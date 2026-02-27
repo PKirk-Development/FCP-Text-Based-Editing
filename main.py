@@ -341,4 +341,34 @@ def list_models():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # When launched as a frozen macOS .app with no file argument
+    # (e.g. double-clicked from Finder), show a native open-file dialog
+    # instead of printing Click's "Missing argument" help text.
+    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        _root = tk.Tk()
+        _root.withdraw()      # hide the blank root window
+        _root.call("wm", "attributes", ".", "-topmost", True)
+
+        _path = filedialog.askopenfilename(
+            title="Open Video, FCPXML, or Project",
+            filetypes=[
+                ("Supported files",
+                 "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
+                ("Video files",           "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
+                ("Final Cut Pro XML",     "*.fcpxml"),
+                ("FCP Text Editor project", "*.fte.json"),
+                ("All files",             "*"),
+            ],
+        )
+        _root.destroy()
+
+        if not _path:
+            sys.exit(0)           # user cancelled — quit cleanly
+
+        # Inject the path so the 'edit' command receives it
+        sys.argv = [sys.argv[0], "edit", _path]
+
     cli()

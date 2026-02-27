@@ -41,3 +41,30 @@ exports/
 
 # ffmpeg/ffprobe logs
 ffmpeg*.log
+
+# ── Build / packaging outputs ──────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec.log
+
+# PyInstaller working directories
+__pycache__/
+*.pyc
+
+# Build virtualenv (separate from dev venv to avoid cross-contamination)
+.venv_build/
+
+# py2app
+.Python
+lib/
+include/
+
+# macOS packaging artefacts
+packaging/icon.iconset/      # generated from make_icon.sh, not stored
+packaging/*.icns             # generated icon — you may choose to commit this
+packaging/*.dmg
+
+# App bundle for local testing (the real one goes in dist/)
+*.app/
