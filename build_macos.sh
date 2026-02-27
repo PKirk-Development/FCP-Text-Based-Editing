@@ -91,6 +91,16 @@ PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
 PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
 [[ $PY_MAJOR -lt 3 || ( $PY_MAJOR -eq 3 && $PY_MINOR -lt 11 ) ]] && \
     error "Python 3.11+ required. Found: $PY_VER"
+# Python 3.13+ has known packaging compatibility issues with PyTorch/Whisper
+# builds.  Python 3.11 or 3.12 is recommended for producing the .app bundle.
+if [[ $PY_MAJOR -eq 3 && $PY_MINOR -ge 13 ]]; then
+    warn "Python $PY_VER detected.  Python 3.11 or 3.12 is recommended for"
+    warn "PyInstaller packaging with Whisper/PyTorch (3.13+ may have"
+    warn "compatibility issues).  Consider: brew install python@3.12"
+    if [[ $WITH_WHISPER -eq 1 ]]; then
+        warn "Proceeding with --with-whisper on Python $PY_VER — build may fail."
+    fi
+fi
 ok "Python $PY_VER  ($PYTHON)"
 
 # Check this is not the system Python

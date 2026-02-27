@@ -69,7 +69,9 @@ if WITH_WHISPER:
         "tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public",
         "ffmpeg",
     ]
-    hiddenimports += collect_submodules("torch")
+    # packaging/hooks/hook-torch.py (in hookspath below) handles the full
+    # torch submodule collection, stdlib hiddenimports (e.g. unittest), and
+    # tensorboard exclusion — no need to duplicate that logic here.
     hiddenimports += collect_submodules("torchvision")
     hiddenimports += collect_submodules("torchaudio")
     hiddenimports += collect_submodules("whisper")
@@ -81,11 +83,18 @@ excludes = [
     "sklearn", "skimage", "sympy", "docutils",
     "wx", "PyQt5", "PyQt6", "PySide2", "PySide6",
     "setuptools._vendor", "pkg_resources._vendor",
-    "test", "unittest", "_pytest",
+    "test", "_pytest",
+    # Note: do NOT exclude `unittest` here — torch.utils._config_module and
+    # other torch/whisper internals import it at runtime inside the frozen app.
 ]
 
 if not WITH_WHISPER:
     excludes += ["whisper", "torch", "torchvision", "torchaudio", "tiktoken"]
+else:
+    # tensorboard is not required at runtime; excluding it prevents the
+    # build-time warning: "failed to collect submodules for
+    # torch.utils.tensorboard because tensorboard is not installed."
+    excludes += ["tensorboard", "torch.utils.tensorboard"]
 
 # ── Analysis ───────────────────────────────────────────────────────────────────
 a = Analysis(

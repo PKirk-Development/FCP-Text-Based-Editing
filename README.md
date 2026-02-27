@@ -51,7 +51,7 @@ delete filler words, and trim your edit from a transcript instead of a timeline.
 ### Prerequisites
 
 - **macOS** (Apple Silicon M1/M2/M3/M4 recommended) or Linux for development
-- **Python 3.10+**
+- **Python 3.10+** for running the tool directly; **Python 3.11 or 3.12** for building the .app bundle (see [Building the App](#building-the-app-making-a-dmg-to-share))
 - **FFmpeg** binary: `brew install ffmpeg`
 
 ### Install Python dependencies
@@ -190,11 +190,18 @@ It will ask for your Mac password. Type it and press Enter (you won't see the le
 
 ---
 
-### Step 3 — Install Python 3.11
+### Step 3 — Install Python 3.12
+
+Python **3.11 or 3.12** is recommended for building the app bundle.  Python 3.13+ has
+known compatibility issues with PyTorch and the PyInstaller packaging toolchain
+(e.g. `ModuleNotFoundError: No module named 'unittest'` at runtime in frozen apps).
 
 ```
-brew install python@3.11
+brew install python@3.12
 ```
+
+> **Note:** Python 3.10+ works fine for running the tool directly (`python main.py …`).
+> The 3.11/3.12 constraint applies only to **building the .app bundle**.
 
 Wait for it to finish.
 
