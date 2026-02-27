@@ -43,12 +43,16 @@ def transcribe(
     """
     try:
         import whisper
-    except ImportError:
+    except (ImportError, RuntimeError, OSError) as exc:
+        # ImportError / ModuleNotFoundError: whisper or a dependency is missing.
+        # RuntimeError: PyTorch / CUDA / MPS backend failed to initialise.
+        # OSError: a data file (mel filterbank, tokenizer vocab, …) is missing
+        #          — common in PyInstaller bundles where assets weren't collected.
         raise ImportError(
-            "openai-whisper is not installed.\n"
+            "openai-whisper is not installed or failed to initialize.\n"
             "Run:  pip install openai-whisper\n"
             "And for Apple Silicon:  pip install torch torchvision torchaudio"
-        )
+        ) from exc
 
     if progress_cb:
         progress_cb(f"Loading Whisper model '{model_size}'…", 5)

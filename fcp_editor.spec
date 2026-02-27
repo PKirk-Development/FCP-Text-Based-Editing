@@ -65,12 +65,14 @@ hiddenimports = [
 if WITH_WHISPER:
     hiddenimports += [
         "whisper",
-        "torch", "torchvision",
+        "torch", "torchvision", "torchaudio",
         "tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public",
         "ffmpeg",
     ]
     hiddenimports += collect_submodules("torch")
     hiddenimports += collect_submodules("torchvision")
+    hiddenimports += collect_submodules("torchaudio")
+    hiddenimports += collect_submodules("whisper")
 
 # ── Exclusions (slim the bundle) ───────────────────────────────────────────────
 excludes = [
