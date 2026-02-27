@@ -34,6 +34,56 @@ from typing import Optional
 import click
 
 
+# ── Progress window (shown during processing in frozen .app) ──────────────────
+
+class _ProgressWindow:
+    """
+    Minimal Tkinter splash that shows progress messages while the processing
+    pipeline runs.  Calling ``update(msg)`` redraws the window so it doesn't
+    appear frozen on macOS.  Only used when the app is frozen (bundled .app).
+    """
+
+    def __init__(self, filename: str) -> None:
+        import tkinter as tk
+
+        self._root = tk.Tk()
+        self._root.title("FCP Text Editor")
+        self._root.geometry("520x140")
+        self._root.configure(bg="#0a0a12")
+        self._root.resizable(False, False)
+        self._root.eval("tk::PlaceWindow . center")
+
+        tk.Label(
+            self._root,
+            text=f"Preparing: {Path(filename).name}",
+            bg="#0a0a12", fg="#aaaaee",
+            font=("Menlo", 13, "bold"),
+            wraplength=480,
+        ).pack(padx=20, pady=(22, 6), anchor="w")
+
+        self._var = tk.StringVar(value="Starting…")
+        tk.Label(
+            self._root,
+            textvariable=self._var,
+            bg="#0a0a12", fg="#888899",
+            font=("Menlo", 11),
+            wraplength=480,
+            justify="left",
+        ).pack(padx=20, anchor="w")
+
+        self._root.update()
+
+    def update(self, msg: str) -> None:
+        self._var.set(msg)
+        self._root.update()
+
+    def close(self) -> None:
+        try:
+            self._root.destroy()
+        except Exception:
+            pass
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _project_path_for(video_path: str) -> str:
@@ -49,6 +99,7 @@ def _process_video(
     buffer: float,
     min_duration: float,
     verbose: bool,
+    progress_window: Optional["_ProgressWindow"] = None,
 ) -> "Project":  # type: ignore[name-defined]
     """Full processing pipeline: extract audio → transcribe → detect silence → timeline."""
     from src.models      import Project, SilenceSettings
@@ -59,6 +110,8 @@ def _process_video(
     def cb(msg: str, pct: int = 0):
         if verbose:
             click.echo(f"  [{pct:3d}%] {msg}")
+        if progress_window:
+            progress_window.update(msg)
 
     settings = SilenceSettings(
         threshold_db = threshold_db,
@@ -69,6 +122,7 @@ def _process_video(
     video_path = str(Path(video_path).resolve())
 
     click.echo(f"→ Inspecting video: {video_path}")
+    cb("Inspecting video…", 0)
     info = get_video_info(video_path)
     click.echo(f"  {info['width']}×{info['height']} @ {info['fps']:.3f} fps  "
                f"({info['duration']:.1f} s)")
@@ -78,6 +132,7 @@ def _process_video(
     extract_audio(video_path, audio_path, progress_cb=lambda m: cb(m, 10))
 
     click.echo(f"→ Transcribing with Whisper '{model_size}'…")
+    cb(f"Transcribing with Whisper '{model_size}'… (this can take a while for long videos)", 15)
     words = transcribe(audio_path, model_size=model_size,
                        progress_cb=lambda m, p: cb(m, p))
     click.echo(f"  {len(words)} words transcribed.")
@@ -87,6 +142,7 @@ def _process_video(
     click.echo(f"  {len(silences)} silence region(s) found.")
 
     click.echo("→ Building timeline…")
+    cb("Building timeline…", 95)
     segments = build_timeline(words, silences, info["duration"], settings)
     click.echo(f"  {len(segments)} total segments (words + silences).")
 
@@ -109,6 +165,7 @@ def _process_fcpxml(
     buffer: float,
     min_duration: float,
     verbose: bool,
+    progress_window: Optional["_ProgressWindow"] = None,
 ) -> "Project":  # type: ignore[name-defined]
     """Process an FCP 11 FCPXML: parse captions → detect silence → timeline."""
     from src.models       import Project, SilenceSettings
@@ -119,6 +176,8 @@ def _process_fcpxml(
     def cb(msg: str):
         if verbose:
             click.echo(f"  {msg}")
+        if progress_window:
+            progress_window.update(msg)
 
     settings = SilenceSettings(
         threshold_db = threshold_db,
@@ -233,14 +292,25 @@ def edit(input_file: str, model: str, threshold: float,
         return
 
     # ── Fresh processing ──────────────────────────────────────────────────────
-    if ext in (".fcpxml", ".fcpxmld"):
-        project = _process_fcpxml(
-            input_file, threshold, buffer, min, verbose
-        )
-    else:
-        project = _process_video(
-            input_file, model, threshold, buffer, min, verbose
-        )
+    # Show a progress window in the frozen macOS .app (no terminal visible).
+    _pw: Optional[_ProgressWindow] = None
+    if getattr(sys, "frozen", False):
+        _pw = _ProgressWindow(input_file)
+
+    try:
+        if ext in (".fcpxml", ".fcpxmld"):
+            project = _process_fcpxml(
+                input_file, threshold, buffer, min, verbose,
+                progress_window=_pw,
+            )
+        else:
+            project = _process_video(
+                input_file, model, threshold, buffer, min, verbose,
+                progress_window=_pw,
+            )
+    finally:
+        if _pw:
+            _pw.close()
 
     # Save so the editor can be re-opened without re-processing
     project.save(proj_file)
