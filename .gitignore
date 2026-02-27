@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# Project runtime files
+*.json          # project save files
+*.wav           # extracted audio (re-generated each run)
+*.mp3
+*.aac
+*.m4a
+
+# Keep example outputs out of repo
+output/
+exports/
+
+# Model weights downloaded by Whisper
+~/.cache/whisper/
+
+# ffmpeg/ffprobe logs
+ffmpeg*.log
+
+# ── Build / packaging outputs ──────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec.log
+
+# PyInstaller working directories
+__pycache__/
+*.pyc
+
+# Build virtualenv (separate from dev venv to avoid cross-contamination)
+.venv_build/
+
+# py2app
+.Python
+lib/
+include/
+
+# macOS packaging artefacts
+packaging/icon.iconset/      # generated from make_icon.sh, not stored
+packaging/*.icns             # generated icon — you may choose to commit this
+packaging/*.dmg
+
+# App bundle for local testing (the real one goes in dist/)
+*.app/

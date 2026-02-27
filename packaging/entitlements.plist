@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime entitlements for FCP Text-Based Editor.
+
+  These two exceptions are required for all PyInstaller-built Python apps
+  because Python relies on unsigned executable memory (JIT / ctypes) and
+  loads third-party native extensions (.so / .dylib) at runtime.
+
+  Without these, notarization will succeed but Gatekeeper will kill the
+  app at launch when the hardened runtime flags the Python interpreter.
+-->
+<plist version="1.0">
+<dict>
+    <!--
+      Allow unsigned / JIT-compiled executable memory.
+      Required by: Python interpreter, numpy, cv2, PyTorch.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+      Allow loading third-party libraries not signed by Apple.
+      Required by: every pip-installed native extension.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!--
+      Allow DYLD environment variables (used by Python's loader).
+    -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>
