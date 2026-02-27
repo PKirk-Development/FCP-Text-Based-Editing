@@ -341,34 +341,111 @@ def list_models():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # When launched as a frozen macOS .app with no file argument
-    # (e.g. double-clicked from Finder), show a native open-file dialog
-    # instead of printing Click's "Missing argument" help text.
-    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import filedialog
+    import multiprocessing
+    # Required for PyInstaller + PyTorch/Whisper frozen apps.
+    # Without this, PyTorch's worker processes re-execute the GUI entry point
+    # instead of becoming workers, causing an immediate crash.
+    multiprocessing.freeze_support()
 
-        _root = tk.Tk()
-        _root.withdraw()      # hide the blank root window
-        _root.call("wm", "attributes", ".", "-topmost", True)
+    if getattr(sys, "frozen", False):
+        # ── Normalise sys.argv for the frozen .app bundle ─────────────────────
+        # Click expects:  [executable, "edit", filepath]
+        # But macOS passes files in two ways that skip the subcommand:
+        #
+        #   1. No args (double-clicked from Finder with no file):
+        #        sys.argv = [executable]
+        #   2. Apple Event / file association (dragged onto icon, or opened via
+        #      "Open With"):
+        #        sys.argv = [executable, "/path/to/file"]
+        #
+        # We normalise both into the Click-friendly form.
 
-        _path = filedialog.askopenfilename(
-            title="Open Video, FCPXML, or Project",
-            filetypes=[
-                ("Supported files",
-                 "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
-                ("Video files",           "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
-                ("Final Cut Pro XML",     "*.fcpxml"),
-                ("FCP Text Editor project", "*.fte.json"),
-                ("All files",             "*"),
-            ],
-        )
-        _root.destroy()
+        _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
 
-        if not _path:
-            sys.exit(0)           # user cancelled — quit cleanly
+        if len(sys.argv) == 1:
+            # Case 1: no file — show a native open-file dialog
+            import tkinter as tk
+            from tkinter import filedialog
 
-        # Inject the path so the 'edit' command receives it
-        sys.argv = [sys.argv[0], "edit", _path]
+            _root = tk.Tk()
+            _root.withdraw()
+            _root.call("wm", "attributes", ".", "-topmost", True)
 
-    cli()
+            _path = filedialog.askopenfilename(
+                title="Open Video, FCPXML, or Project",
+                filetypes=[
+                    ("Supported files",
+                     "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
+                    ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
+                    ("Final Cut Pro XML",        "*.fcpxml"),
+                    ("FCP Text Editor project",  "*.fte.json"),
+                    ("All files",                "*"),
+                ],
+            )
+            _root.destroy()
+
+            if not _path:
+                sys.exit(0)   # user cancelled — quit cleanly
+
+            sys.argv = [sys.argv[0], "edit", _path]
+
+        elif len(sys.argv) >= 2 and sys.argv[1] not in _CLICK_CMDS:
+            # Case 2: file path(s) injected by Apple Events / argv_emulation
+            # — they arrived without the "edit" subcommand prefix.
+            sys.argv = [sys.argv[0], "edit"] + sys.argv[1:]
+
+    # ── Run Click CLI, with a crash-reporter safety net ───────────────────────
+    # In a frozen app, unhandled exceptions are invisible (the window just
+    # disappears). This wrapper catches them and shows a dialog with the full
+    # traceback so crashes are diagnosable.
+    try:
+        cli()
+    except SystemExit:
+        raise   # let Click's normal exit codes through
+    except Exception as _exc:
+        import traceback
+        _tb = traceback.format_exc()
+
+        # Try to show a GUI error dialog; fall back to stderr
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, scrolledtext
+
+            _err_root = tk.Tk()
+            _err_root.title("FCP Text Editor — Crash Report")
+            _err_root.geometry("700x420")
+            _err_root.configure(bg="#0a0a12")
+
+            tk.Label(
+                _err_root,
+                text=f"An error occurred:\n{_exc}",
+                bg="#0a0a12", fg="#ff4444",
+                font=("Menlo", 12), wraplength=660, justify="left",
+            ).pack(padx=16, pady=(16, 4), anchor="w")
+
+            _st = scrolledtext.ScrolledText(
+                _err_root, font=("Menlo", 10),
+                bg="#0d0d1f", fg="#ccccee",
+                height=16, relief="flat",
+            )
+            _st.insert("end", _tb)
+            _st.configure(state="disabled")
+            _st.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+            tk.Button(
+                _err_root, text="Copy to Clipboard",
+                command=lambda: (_err_root.clipboard_clear(),
+                                 _err_root.clipboard_append(_tb)),
+                bg="#1a1a3a", fg="#aaaaee", relief="flat",
+            ).pack(side="left", padx=16, pady=8)
+            tk.Button(
+                _err_root, text="Quit",
+                command=_err_root.destroy,
+                bg="#2a1a1a", fg="#ee8888", relief="flat",
+            ).pack(side="right", padx=16, pady=8)
+
+            _err_root.mainloop()
+        except Exception:
+            print(_tb, file=sys.stderr)
+
+        sys.exit(1)
