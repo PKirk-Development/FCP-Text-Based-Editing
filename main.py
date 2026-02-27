@@ -34,6 +34,80 @@ from typing import Optional
 import click
 
 
+# ── Persistent Tk root for the frozen .app ────────────────────────────────────
+# On macOS PyInstaller, calling tk.Tk() a second time after destroy() is fatal.
+# We keep ONE root alive for the whole process lifetime and use Toplevel for
+# all subsequent windows (file dialog, progress, crash reporter).
+_TK_ROOT: Optional[object] = None   # set in __main__ block, reused everywhere
+
+
+# ── Progress window (shown during processing in frozen .app) ──────────────────
+
+class _ProgressWindow:
+    """
+    Minimal splash that shows progress messages while the processing pipeline
+    runs.  Uses tk.Toplevel so it never creates a second tk.Tk() instance.
+    Falls back to a no-op if Tkinter fails for any reason.
+    """
+
+    def __init__(self, filename: str) -> None:
+        self._top = None
+        self._var = None
+        try:
+            import tkinter as tk
+            global _TK_ROOT
+            if _TK_ROOT is None:
+                return
+            top = tk.Toplevel(_TK_ROOT)
+            top.title("FCP Text Editor")
+            top.geometry("520x140")
+            top.configure(bg="#0a0a12")
+            top.resizable(False, False)
+            top.eval("tk::PlaceWindow . center")
+
+            tk.Label(
+                top,
+                text=f"Preparing: {Path(filename).name}",
+                bg="#0a0a12", fg="#aaaaee",
+                font=("Menlo", 13, "bold"),
+                wraplength=480,
+            ).pack(padx=20, pady=(22, 6), anchor="w")
+
+            self._var = tk.StringVar(value="Starting…")
+            tk.Label(
+                top,
+                textvariable=self._var,
+                bg="#0a0a12", fg="#888899",
+                font=("Menlo", 11),
+                wraplength=480,
+                justify="left",
+            ).pack(padx=20, anchor="w")
+
+            self._top = top
+            _TK_ROOT.update()  # type: ignore[union-attr]
+        except Exception:
+            self._top = None
+            self._var = None
+
+    def update(self, msg: str) -> None:
+        if self._top is None or self._var is None:
+            return
+        try:
+            self._var.set(msg)
+            _TK_ROOT.update()  # type: ignore[union-attr]
+        except Exception:
+            self._top = None
+
+    def close(self) -> None:
+        if self._top is None:
+            return
+        try:
+            self._top.destroy()
+        except Exception:
+            pass
+        self._top = None
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _project_path_for(video_path: str) -> str:
@@ -49,6 +123,7 @@ def _process_video(
     buffer: float,
     min_duration: float,
     verbose: bool,
+    progress_window: Optional["_ProgressWindow"] = None,
 ) -> "Project":  # type: ignore[name-defined]
     """Full processing pipeline: extract audio → transcribe → detect silence → timeline."""
     from src.models      import Project, SilenceSettings
@@ -59,6 +134,8 @@ def _process_video(
     def cb(msg: str, pct: int = 0):
         if verbose:
             click.echo(f"  [{pct:3d}%] {msg}")
+        if progress_window:
+            progress_window.update(msg)
 
     settings = SilenceSettings(
         threshold_db = threshold_db,
@@ -69,6 +146,7 @@ def _process_video(
     video_path = str(Path(video_path).resolve())
 
     click.echo(f"→ Inspecting video: {video_path}")
+    cb("Inspecting video…", 0)
     info = get_video_info(video_path)
     click.echo(f"  {info['width']}×{info['height']} @ {info['fps']:.3f} fps  "
                f"({info['duration']:.1f} s)")
@@ -78,6 +156,7 @@ def _process_video(
     extract_audio(video_path, audio_path, progress_cb=lambda m: cb(m, 10))
 
     click.echo(f"→ Transcribing with Whisper '{model_size}'…")
+    cb(f"Transcribing with Whisper '{model_size}'… (this can take a while for long videos)", 15)
     words = transcribe(audio_path, model_size=model_size,
                        progress_cb=lambda m, p: cb(m, p))
     click.echo(f"  {len(words)} words transcribed.")
@@ -87,6 +166,7 @@ def _process_video(
     click.echo(f"  {len(silences)} silence region(s) found.")
 
     click.echo("→ Building timeline…")
+    cb("Building timeline…", 95)
     segments = build_timeline(words, silences, info["duration"], settings)
     click.echo(f"  {len(segments)} total segments (words + silences).")
 
@@ -109,6 +189,7 @@ def _process_fcpxml(
     buffer: float,
     min_duration: float,
     verbose: bool,
+    progress_window: Optional["_ProgressWindow"] = None,
 ) -> "Project":  # type: ignore[name-defined]
     """Process an FCP 11 FCPXML: parse captions → detect silence → timeline."""
     from src.models       import Project, SilenceSettings
@@ -119,6 +200,8 @@ def _process_fcpxml(
     def cb(msg: str):
         if verbose:
             click.echo(f"  {msg}")
+        if progress_window:
+            progress_window.update(msg)
 
     settings = SilenceSettings(
         threshold_db = threshold_db,
@@ -233,14 +316,25 @@ def edit(input_file: str, model: str, threshold: float,
         return
 
     # ── Fresh processing ──────────────────────────────────────────────────────
-    if ext in (".fcpxml", ".fcpxmld"):
-        project = _process_fcpxml(
-            input_file, threshold, buffer, min, verbose
-        )
-    else:
-        project = _process_video(
-            input_file, model, threshold, buffer, min, verbose
-        )
+    # Show a progress window in the frozen macOS .app (no terminal visible).
+    _pw: Optional[_ProgressWindow] = None
+    if getattr(sys, "frozen", False):
+        _pw = _ProgressWindow(input_file)
+
+    try:
+        if ext in (".fcpxml", ".fcpxmld"):
+            project = _process_fcpxml(
+                input_file, threshold, buffer, min, verbose,
+                progress_window=_pw,
+            )
+        else:
+            project = _process_video(
+                input_file, model, threshold, buffer, min, verbose,
+                progress_window=_pw,
+            )
+    finally:
+        if _pw:
+            _pw.close()
 
     # Save so the editor can be re-opened without re-processing
     project.save(proj_file)
@@ -341,34 +435,166 @@ def list_models():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # When launched as a frozen macOS .app with no file argument
-    # (e.g. double-clicked from Finder), show a native open-file dialog
-    # instead of printing Click's "Missing argument" help text.
-    if getattr(sys, "frozen", False) and len(sys.argv) == 1:
-        import tkinter as tk
-        from tkinter import filedialog
+    import multiprocessing
+    # Required for PyInstaller + PyTorch/Whisper frozen apps.
+    # Without this, PyTorch's worker processes re-execute the GUI entry point
+    # instead of becoming workers, causing an immediate crash.
+    multiprocessing.freeze_support()
 
-        _root = tk.Tk()
-        _root.withdraw()      # hide the blank root window
-        _root.call("wm", "attributes", ".", "-topmost", True)
+    # ── Run everything inside one top-level try/except ────────────────────────
+    # In a frozen app, unhandled exceptions are invisible (the window just
+    # disappears). This wrapper catches them and shows a dialog with the full
+    # traceback so crashes are diagnosable.
+    try:
+        if getattr(sys, "frozen", False):
+            # ── Normalise sys.argv for the frozen .app bundle ─────────────────
+            # Click expects:  [executable, "edit", filepath]
+            # But macOS passes files in two ways that skip the subcommand:
+            #
+            #   1. No args (double-clicked from Finder with no file):
+            #        sys.argv = [executable]
+            #   2. Apple Event / file association (dragged onto icon, or opened
+            #      via "Open With"):
+            #        sys.argv = [executable, "/path/to/file"]
+            #
+            # We normalise both into the Click-friendly form.
 
-        _path = filedialog.askopenfilename(
-            title="Open Video, FCPXML, or Project",
-            filetypes=[
-                ("Supported files",
-                 "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
-                ("Video files",           "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
-                ("Final Cut Pro XML",     "*.fcpxml"),
-                ("FCP Text Editor project", "*.fte.json"),
-                ("All files",             "*"),
-            ],
-        )
-        _root.destroy()
+            _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
 
-        if not _path:
-            sys.exit(0)           # user cancelled — quit cleanly
+            if len(sys.argv) == 1:
+                # Case 1: no file — show a native open-file dialog.
+                # IMPORTANT: keep _root alive as _TK_ROOT — on macOS
+                # PyInstaller, calling tk.Tk() a second time after destroy()
+                # is fatal.  All later windows (progress, crash reporter)
+                # use Toplevel(_TK_ROOT) as their parent.
+                # NOTE: plain assignment at module level sets the module global
+                # directly — no 'import main' tricks needed.
+                import tkinter as tk
+                from tkinter import filedialog
 
-        # Inject the path so the 'edit' command receives it
-        sys.argv = [sys.argv[0], "edit", _path]
+                _root = tk.Tk()
+                _root.withdraw()
+                _root.call("wm", "attributes", ".", "-topmost", True)
 
-    cli()
+                _path = filedialog.askopenfilename(
+                    title="Open Video, FCPXML, or Project",
+                    filetypes=[
+                        ("Supported files",
+                         "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
+                        ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
+                        ("Final Cut Pro XML",        "*.fcpxml"),
+                        ("FCP Text Editor project",  "*.fte.json"),
+                        ("All files",                "*"),
+                    ],
+                )
+
+                if not _path:
+                    _root.destroy()
+                    sys.exit(0)   # user cancelled — quit cleanly
+
+                # Keep the root alive; assign directly to the module global.
+                # Python module-level if-blocks share the module namespace —
+                # this IS the same _TK_ROOT that _ProgressWindow and the crash
+                # reporter reference via 'global _TK_ROOT'.
+                _TK_ROOT = _root  # noqa: F841
+
+                sys.argv = [sys.argv[0], "edit", _path]
+
+            elif len(sys.argv) >= 2 and sys.argv[1] not in _CLICK_CMDS:
+                # Case 2: file path(s) injected by Apple Events / argv_emulation
+                # — they arrived without the "edit" subcommand prefix.
+                sys.argv = [sys.argv[0], "edit"] + sys.argv[1:]
+
+        cli()
+    except SystemExit:
+        raise   # let Click's normal exit codes through
+    except Exception as _exc:
+        import traceback
+        _tb = traceback.format_exc()
+
+        # ── Always write a crash log first (survives any UI failure) ──────────
+        try:
+            import datetime
+            _log_dir = Path.home() / "Library" / "Logs" / "FCPTextEditor"
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            (_log_dir / f"crash_{_ts}.log").write_text(_tb, encoding="utf-8")
+        except Exception:
+            pass
+
+        # ── Try to show a GUI error dialog ────────────────────────────────────
+        # Use Toplevel on _TK_ROOT if available — never create a second tk.Tk()
+        try:
+            import tkinter as tk
+            from tkinter import scrolledtext
+
+            global _TK_ROOT
+            if _TK_ROOT is not None:
+                _err_win = tk.Toplevel(_TK_ROOT)
+            else:
+                _TK_ROOT = tk.Tk()
+                _err_win = _TK_ROOT
+
+            _err_win.title("FCP Text Editor — Crash Report")
+            _err_win.geometry("700x420")
+            _err_win.configure(bg="#0a0a12")
+
+            tk.Label(
+                _err_win,
+                text=f"An error occurred:\n{_exc}",
+                bg="#0a0a12", fg="#ff4444",
+                font=("Menlo", 12), wraplength=660, justify="left",
+            ).pack(padx=16, pady=(16, 4), anchor="w")
+
+            _st = scrolledtext.ScrolledText(
+                _err_win, font=("Menlo", 10),
+                bg="#0d0d1f", fg="#ccccee",
+                height=16, relief="flat",
+            )
+            _st.insert("end", _tb)
+            _st.configure(state="disabled")
+            _st.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+            def _quit_err():
+                try:
+                    _err_win.destroy()
+                except Exception:
+                    pass
+                try:
+                    _TK_ROOT.destroy()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
+            tk.Button(
+                _err_win, text="Copy to Clipboard",
+                command=lambda: (_err_win.clipboard_clear(),
+                                 _err_win.clipboard_append(_tb)),
+                bg="#1a1a3a", fg="#aaaaee", relief="flat",
+            ).pack(side="left", padx=16, pady=8)
+            tk.Button(
+                _err_win, text="Quit",
+                command=_quit_err,
+                bg="#2a1a1a", fg="#ee8888", relief="flat",
+            ).pack(side="right", padx=16, pady=8)
+
+            # Block until the dialog is closed.  Use wait_window for Toplevel;
+            # mainloop for a plain Tk root.
+            if isinstance(_err_win, tk.Toplevel):
+                _TK_ROOT.wait_window(_err_win)  # type: ignore[union-attr]
+            else:
+                _err_win.mainloop()
+        except Exception:
+            # Last resort: macOS native dialog (no Tkinter needed)
+            try:
+                import subprocess as _sp
+                _msg = str(_exc)[:400].replace('"', "'")
+                _sp.run(
+                    ["osascript", "-e",
+                     f'display alert "FCP Text Editor — Error" '
+                     f'message "{_msg}" as critical'],
+                    timeout=30,
+                )
+            except Exception:
+                print(_tb, file=sys.stderr)
+
+        sys.exit(1)
