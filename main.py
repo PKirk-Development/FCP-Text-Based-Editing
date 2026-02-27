@@ -34,54 +34,78 @@ from typing import Optional
 import click
 
 
+# ── Persistent Tk root for the frozen .app ────────────────────────────────────
+# On macOS PyInstaller, calling tk.Tk() a second time after destroy() is fatal.
+# We keep ONE root alive for the whole process lifetime and use Toplevel for
+# all subsequent windows (file dialog, progress, crash reporter).
+_TK_ROOT: Optional[object] = None   # set in __main__ block, reused everywhere
+
+
 # ── Progress window (shown during processing in frozen .app) ──────────────────
 
 class _ProgressWindow:
     """
-    Minimal Tkinter splash that shows progress messages while the processing
-    pipeline runs.  Calling ``update(msg)`` redraws the window so it doesn't
-    appear frozen on macOS.  Only used when the app is frozen (bundled .app).
+    Minimal splash that shows progress messages while the processing pipeline
+    runs.  Uses tk.Toplevel so it never creates a second tk.Tk() instance.
+    Falls back to a no-op if Tkinter fails for any reason.
     """
 
     def __init__(self, filename: str) -> None:
-        import tkinter as tk
+        self._top = None
+        self._var = None
+        try:
+            import tkinter as tk
+            global _TK_ROOT
+            if _TK_ROOT is None:
+                return
+            top = tk.Toplevel(_TK_ROOT)
+            top.title("FCP Text Editor")
+            top.geometry("520x140")
+            top.configure(bg="#0a0a12")
+            top.resizable(False, False)
+            top.eval("tk::PlaceWindow . center")
 
-        self._root = tk.Tk()
-        self._root.title("FCP Text Editor")
-        self._root.geometry("520x140")
-        self._root.configure(bg="#0a0a12")
-        self._root.resizable(False, False)
-        self._root.eval("tk::PlaceWindow . center")
+            tk.Label(
+                top,
+                text=f"Preparing: {Path(filename).name}",
+                bg="#0a0a12", fg="#aaaaee",
+                font=("Menlo", 13, "bold"),
+                wraplength=480,
+            ).pack(padx=20, pady=(22, 6), anchor="w")
 
-        tk.Label(
-            self._root,
-            text=f"Preparing: {Path(filename).name}",
-            bg="#0a0a12", fg="#aaaaee",
-            font=("Menlo", 13, "bold"),
-            wraplength=480,
-        ).pack(padx=20, pady=(22, 6), anchor="w")
+            self._var = tk.StringVar(value="Starting…")
+            tk.Label(
+                top,
+                textvariable=self._var,
+                bg="#0a0a12", fg="#888899",
+                font=("Menlo", 11),
+                wraplength=480,
+                justify="left",
+            ).pack(padx=20, anchor="w")
 
-        self._var = tk.StringVar(value="Starting…")
-        tk.Label(
-            self._root,
-            textvariable=self._var,
-            bg="#0a0a12", fg="#888899",
-            font=("Menlo", 11),
-            wraplength=480,
-            justify="left",
-        ).pack(padx=20, anchor="w")
-
-        self._root.update()
+            self._top = top
+            _TK_ROOT.update()  # type: ignore[union-attr]
+        except Exception:
+            self._top = None
+            self._var = None
 
     def update(self, msg: str) -> None:
-        self._var.set(msg)
-        self._root.update()
+        if self._top is None or self._var is None:
+            return
+        try:
+            self._var.set(msg)
+            _TK_ROOT.update()  # type: ignore[union-attr]
+        except Exception:
+            self._top = None
 
     def close(self) -> None:
+        if self._top is None:
+            return
         try:
-            self._root.destroy()
+            self._top.destroy()
         except Exception:
             pass
+        self._top = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -433,7 +457,11 @@ if __name__ == "__main__":
         _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
 
         if len(sys.argv) == 1:
-            # Case 1: no file — show a native open-file dialog
+            # Case 1: no file — show a native open-file dialog.
+            # IMPORTANT: do NOT destroy _root after the dialog — on macOS
+            # PyInstaller, calling tk.Tk() a second time after destroy() is
+            # fatal.  Keep _root alive as _TK_ROOT so later Toplevel windows
+            # (progress, crash reporter) can use it as their parent.
             import tkinter as tk
             from tkinter import filedialog
 
@@ -452,10 +480,14 @@ if __name__ == "__main__":
                     ("All files",                "*"),
                 ],
             )
-            _root.destroy()
 
             if not _path:
+                _root.destroy()
                 sys.exit(0)   # user cancelled — quit cleanly
+
+            # Keep root alive for progress window and crash reporter
+            import main as _main_mod
+            _main_mod._TK_ROOT = _root
 
             sys.argv = [sys.argv[0], "edit", _path]
 
@@ -476,25 +508,42 @@ if __name__ == "__main__":
         import traceback
         _tb = traceback.format_exc()
 
-        # Try to show a GUI error dialog; fall back to stderr
+        # ── Always write a crash log first (survives any UI failure) ──────────
+        try:
+            import datetime
+            _log_dir = Path.home() / "Library" / "Logs" / "FCPTextEditor"
+            _log_dir.mkdir(parents=True, exist_ok=True)
+            _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            (_log_dir / f"crash_{_ts}.log").write_text(_tb, encoding="utf-8")
+        except Exception:
+            pass
+
+        # ── Try to show a GUI error dialog ────────────────────────────────────
+        # Use Toplevel on _TK_ROOT if available — never create a second tk.Tk()
         try:
             import tkinter as tk
-            from tkinter import messagebox, scrolledtext
+            from tkinter import scrolledtext
 
-            _err_root = tk.Tk()
-            _err_root.title("FCP Text Editor — Crash Report")
-            _err_root.geometry("700x420")
-            _err_root.configure(bg="#0a0a12")
+            global _TK_ROOT
+            if _TK_ROOT is not None:
+                _err_win = tk.Toplevel(_TK_ROOT)
+            else:
+                _TK_ROOT = tk.Tk()
+                _err_win = _TK_ROOT
+
+            _err_win.title("FCP Text Editor — Crash Report")
+            _err_win.geometry("700x420")
+            _err_win.configure(bg="#0a0a12")
 
             tk.Label(
-                _err_root,
+                _err_win,
                 text=f"An error occurred:\n{_exc}",
                 bg="#0a0a12", fg="#ff4444",
                 font=("Menlo", 12), wraplength=660, justify="left",
             ).pack(padx=16, pady=(16, 4), anchor="w")
 
             _st = scrolledtext.ScrolledText(
-                _err_root, font=("Menlo", 10),
+                _err_win, font=("Menlo", 10),
                 bg="#0d0d1f", fg="#ccccee",
                 height=16, relief="flat",
             )
@@ -502,20 +551,46 @@ if __name__ == "__main__":
             _st.configure(state="disabled")
             _st.pack(fill="both", expand=True, padx=16, pady=(0, 8))
 
+            def _quit_err():
+                try:
+                    _err_win.destroy()
+                except Exception:
+                    pass
+                try:
+                    _TK_ROOT.destroy()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+
             tk.Button(
-                _err_root, text="Copy to Clipboard",
-                command=lambda: (_err_root.clipboard_clear(),
-                                 _err_root.clipboard_append(_tb)),
+                _err_win, text="Copy to Clipboard",
+                command=lambda: (_err_win.clipboard_clear(),
+                                 _err_win.clipboard_append(_tb)),
                 bg="#1a1a3a", fg="#aaaaee", relief="flat",
             ).pack(side="left", padx=16, pady=8)
             tk.Button(
-                _err_root, text="Quit",
-                command=_err_root.destroy,
+                _err_win, text="Quit",
+                command=_quit_err,
                 bg="#2a1a1a", fg="#ee8888", relief="flat",
             ).pack(side="right", padx=16, pady=8)
 
-            _err_root.mainloop()
+            # Block until the dialog is closed.  Use wait_window for Toplevel;
+            # mainloop for a plain Tk root.
+            if isinstance(_err_win, tk.Toplevel):
+                _TK_ROOT.wait_window(_err_win)  # type: ignore[union-attr]
+            else:
+                _err_win.mainloop()
         except Exception:
-            print(_tb, file=sys.stderr)
+            # Last resort: macOS native dialog (no Tkinter needed)
+            try:
+                import subprocess as _sp
+                _msg = str(_exc)[:400].replace('"', "'")
+                _sp.run(
+                    ["osascript", "-e",
+                     f'display alert "FCP Text Editor — Error" '
+                     f'message "{_msg}" as critical'],
+                    timeout=30,
+                )
+            except Exception:
+                print(_tb, file=sys.stderr)
 
         sys.exit(1)
