@@ -462,41 +462,34 @@ if __name__ == "__main__":
             _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
 
             if len(sys.argv) == 1:
-                # Case 1: no file — show a native open-file dialog.
-                # IMPORTANT: keep _root alive as _TK_ROOT — on macOS
-                # PyInstaller, calling tk.Tk() a second time after destroy()
-                # is fatal.  All later windows (progress, crash reporter)
-                # use Toplevel(_TK_ROOT) as their parent.
-                # NOTE: plain assignment at module level sets the module global
-                # directly — no 'import main' tricks needed.
-                import tkinter as tk
-                from tkinter import filedialog
+                # Case 1: no file — show a native macOS open-file dialog.
+                #
+                # We use osascript (AppleScript) rather than tk.Tk() +
+                # filedialog because CustomTkinter re-initialises NSApplication
+                # inside CTk.__init__().  If a tk.Tk() instance already exists
+                # when TextEditor (a CTk subclass) is created, NSApplication is
+                # initialised a second time, which crashes immediately on macOS
+                # PyInstaller builds.  Using osascript keeps _TK_ROOT as None
+                # so the editor's CTk window is the only Tk instance.
+                import subprocess as _sp
 
-                _root = tk.Tk()
-                _root.withdraw()
-                _root.call("wm", "attributes", ".", "-topmost", True)
-
-                _path = filedialog.askopenfilename(
-                    title="Open Video, FCPXML, or Project",
-                    filetypes=[
-                        ("Supported files",
-                         "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
-                        ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
-                        ("Final Cut Pro XML",        "*.fcpxml"),
-                        ("FCP Text Editor project",  "*.fte.json"),
-                        ("All files",                "*"),
-                    ],
+                _ascript = (
+                    "try\n"
+                    "  set f to choose file with prompt "
+                    "\"Open Video, FCPXML, or Project\"\n"
+                    "  return POSIX path of f\n"
+                    "on error\n"
+                    "  return \"\"\n"
+                    "end try"
                 )
+                _sp_result = _sp.run(
+                    ["/usr/bin/osascript", "-e", _ascript],
+                    capture_output=True, text=True,
+                )
+                _path = _sp_result.stdout.strip()
 
                 if not _path:
-                    _root.destroy()
                     sys.exit(0)   # user cancelled — quit cleanly
-
-                # Keep the root alive; assign directly to the module global.
-                # Python module-level if-blocks share the module namespace —
-                # this IS the same _TK_ROOT that _ProgressWindow and the crash
-                # reporter reference via 'global _TK_ROOT'.
-                _TK_ROOT = _root  # noqa: F841
 
                 sys.argv = [sys.argv[0], "edit", _path]
 
@@ -528,7 +521,10 @@ if __name__ == "__main__":
             import tkinter as tk
             from tkinter import scrolledtext
 
-            global _TK_ROOT
+            # NOTE: no 'global _TK_ROOT' here — module-level code can read and
+            # assign module globals directly without a 'global' declaration.
+            # 'global' inside a try/except is a SyntaxError in Python 3.12 when
+            # the name has a type annotation at module level.
             if _TK_ROOT is not None:
                 _err_win = tk.Toplevel(_TK_ROOT)
             else:
