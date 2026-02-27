@@ -38,7 +38,17 @@ import click
 # On macOS PyInstaller, calling tk.Tk() a second time after destroy() is fatal.
 # We keep ONE root alive for the whole process lifetime and use Toplevel for
 # all subsequent windows (file dialog, progress, crash reporter).
-_TK_ROOT: Optional[object] = None   # set in __main__ block, reused everywhere
+#
+# Python 3.14 rejects `global` for any name that also carries a module-level
+# type annotation (PEP 526 annotated assignment).  To avoid both the annotation
+# and the `global` keyword entirely, we encapsulate the root in a small
+# single-instance container whose plain (un-annotated) attribute can be read
+# and written by any code in this module without `global`.
+class _TkRootHolder:
+    """Holds the single persistent tk.Tk() root for the whole process."""
+    root: Optional[object] = None   # type: ignore[assignment]
+
+_TK = _TkRootHolder()
 
 
 # ── Progress window (shown during processing in frozen .app) ──────────────────
@@ -55,10 +65,9 @@ class _ProgressWindow:
         self._var = None
         try:
             import tkinter as tk
-            global _TK_ROOT
-            if _TK_ROOT is None:
+            if _TK.root is None:
                 return
-            top = tk.Toplevel(_TK_ROOT)
+            top = tk.Toplevel(_TK.root)
             top.title("FCP Text Editor")
             top.geometry("520x140")
             top.configure(bg="#0a0a12")
@@ -84,7 +93,7 @@ class _ProgressWindow:
             ).pack(padx=20, anchor="w")
 
             self._top = top
-            _TK_ROOT.update()  # type: ignore[union-attr]
+            _TK.root.update()  # type: ignore[union-attr]
         except Exception:
             self._top = None
             self._var = None
@@ -94,7 +103,7 @@ class _ProgressWindow:
             return
         try:
             self._var.set(msg)
-            _TK_ROOT.update()  # type: ignore[union-attr]
+            _TK.root.update()  # type: ignore[union-attr]
         except Exception:
             self._top = None
 
@@ -463,12 +472,10 @@ if __name__ == "__main__":
 
             if len(sys.argv) == 1:
                 # Case 1: no file — show a native open-file dialog.
-                # IMPORTANT: keep _root alive as _TK_ROOT — on macOS
+                # IMPORTANT: keep _root alive via _TK — on macOS
                 # PyInstaller, calling tk.Tk() a second time after destroy()
                 # is fatal.  All later windows (progress, crash reporter)
-                # use Toplevel(_TK_ROOT) as their parent.
-                # NOTE: plain assignment at module level sets the module global
-                # directly — no 'import main' tricks needed.
+                # use Toplevel(_TK.root) as their parent.
                 import tkinter as tk
                 from tkinter import filedialog
 
@@ -492,11 +499,9 @@ if __name__ == "__main__":
                     _root.destroy()
                     sys.exit(0)   # user cancelled — quit cleanly
 
-                # Keep the root alive; assign directly to the module global.
-                # Python module-level if-blocks share the module namespace —
-                # this IS the same _TK_ROOT that _ProgressWindow and the crash
-                # reporter reference via 'global _TK_ROOT'.
-                _TK_ROOT = _root  # noqa: F841
+                # Keep the root alive via the module-level holder so that
+                # _ProgressWindow and the crash reporter can use Toplevel.
+                _TK.root = _root  # noqa: F841
 
                 sys.argv = [sys.argv[0], "edit", _path]
 
@@ -523,17 +528,16 @@ if __name__ == "__main__":
             pass
 
         # ── Try to show a GUI error dialog ────────────────────────────────────
-        # Use Toplevel on _TK_ROOT if available — never create a second tk.Tk()
+        # Use Toplevel on _TK.root if available — never create a second tk.Tk()
         try:
             import tkinter as tk
             from tkinter import scrolledtext
 
-            global _TK_ROOT
-            if _TK_ROOT is not None:
-                _err_win = tk.Toplevel(_TK_ROOT)
+            if _TK.root is not None:
+                _err_win = tk.Toplevel(_TK.root)
             else:
-                _TK_ROOT = tk.Tk()
-                _err_win = _TK_ROOT
+                _TK.root = tk.Tk()
+                _err_win = _TK.root
 
             _err_win.title("FCP Text Editor — Crash Report")
             _err_win.geometry("700x420")
@@ -561,7 +565,7 @@ if __name__ == "__main__":
                 except Exception:
                     pass
                 try:
-                    _TK_ROOT.destroy()  # type: ignore[union-attr]
+                    _TK.root.destroy()  # type: ignore[union-attr]
                 except Exception:
                     pass
 
@@ -580,7 +584,7 @@ if __name__ == "__main__":
             # Block until the dialog is closed.  Use wait_window for Toplevel;
             # mainloop for a plain Tk root.
             if isinstance(_err_win, tk.Toplevel):
-                _TK_ROOT.wait_window(_err_win)  # type: ignore[union-attr]
+                _TK.root.wait_window(_err_win)  # type: ignore[union-attr]
             else:
                 _err_win.mainloop()
         except Exception:
