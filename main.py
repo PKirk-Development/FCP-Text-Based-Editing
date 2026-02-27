@@ -441,66 +441,70 @@ if __name__ == "__main__":
     # instead of becoming workers, causing an immediate crash.
     multiprocessing.freeze_support()
 
-    if getattr(sys, "frozen", False):
-        # ── Normalise sys.argv for the frozen .app bundle ─────────────────────
-        # Click expects:  [executable, "edit", filepath]
-        # But macOS passes files in two ways that skip the subcommand:
-        #
-        #   1. No args (double-clicked from Finder with no file):
-        #        sys.argv = [executable]
-        #   2. Apple Event / file association (dragged onto icon, or opened via
-        #      "Open With"):
-        #        sys.argv = [executable, "/path/to/file"]
-        #
-        # We normalise both into the Click-friendly form.
-
-        _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
-
-        if len(sys.argv) == 1:
-            # Case 1: no file — show a native open-file dialog.
-            # IMPORTANT: do NOT destroy _root after the dialog — on macOS
-            # PyInstaller, calling tk.Tk() a second time after destroy() is
-            # fatal.  Keep _root alive as _TK_ROOT so later Toplevel windows
-            # (progress, crash reporter) can use it as their parent.
-            import tkinter as tk
-            from tkinter import filedialog
-
-            _root = tk.Tk()
-            _root.withdraw()
-            _root.call("wm", "attributes", ".", "-topmost", True)
-
-            _path = filedialog.askopenfilename(
-                title="Open Video, FCPXML, or Project",
-                filetypes=[
-                    ("Supported files",
-                     "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
-                    ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
-                    ("Final Cut Pro XML",        "*.fcpxml"),
-                    ("FCP Text Editor project",  "*.fte.json"),
-                    ("All files",                "*"),
-                ],
-            )
-
-            if not _path:
-                _root.destroy()
-                sys.exit(0)   # user cancelled — quit cleanly
-
-            # Keep root alive for progress window and crash reporter
-            import main as _main_mod
-            _main_mod._TK_ROOT = _root
-
-            sys.argv = [sys.argv[0], "edit", _path]
-
-        elif len(sys.argv) >= 2 and sys.argv[1] not in _CLICK_CMDS:
-            # Case 2: file path(s) injected by Apple Events / argv_emulation
-            # — they arrived without the "edit" subcommand prefix.
-            sys.argv = [sys.argv[0], "edit"] + sys.argv[1:]
-
-    # ── Run Click CLI, with a crash-reporter safety net ───────────────────────
+    # ── Run everything inside one top-level try/except ────────────────────────
     # In a frozen app, unhandled exceptions are invisible (the window just
     # disappears). This wrapper catches them and shows a dialog with the full
     # traceback so crashes are diagnosable.
     try:
+        if getattr(sys, "frozen", False):
+            # ── Normalise sys.argv for the frozen .app bundle ─────────────────
+            # Click expects:  [executable, "edit", filepath]
+            # But macOS passes files in two ways that skip the subcommand:
+            #
+            #   1. No args (double-clicked from Finder with no file):
+            #        sys.argv = [executable]
+            #   2. Apple Event / file association (dragged onto icon, or opened
+            #      via "Open With"):
+            #        sys.argv = [executable, "/path/to/file"]
+            #
+            # We normalise both into the Click-friendly form.
+
+            _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
+
+            if len(sys.argv) == 1:
+                # Case 1: no file — show a native open-file dialog.
+                # IMPORTANT: keep _root alive as _TK_ROOT — on macOS
+                # PyInstaller, calling tk.Tk() a second time after destroy()
+                # is fatal.  All later windows (progress, crash reporter)
+                # use Toplevel(_TK_ROOT) as their parent.
+                # NOTE: plain assignment at module level sets the module global
+                # directly — no 'import main' tricks needed.
+                import tkinter as tk
+                from tkinter import filedialog
+
+                _root = tk.Tk()
+                _root.withdraw()
+                _root.call("wm", "attributes", ".", "-topmost", True)
+
+                _path = filedialog.askopenfilename(
+                    title="Open Video, FCPXML, or Project",
+                    filetypes=[
+                        ("Supported files",
+                         "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
+                        ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
+                        ("Final Cut Pro XML",        "*.fcpxml"),
+                        ("FCP Text Editor project",  "*.fte.json"),
+                        ("All files",                "*"),
+                    ],
+                )
+
+                if not _path:
+                    _root.destroy()
+                    sys.exit(0)   # user cancelled — quit cleanly
+
+                # Keep the root alive; assign directly to the module global.
+                # Python module-level if-blocks share the module namespace —
+                # this IS the same _TK_ROOT that _ProgressWindow and the crash
+                # reporter reference via 'global _TK_ROOT'.
+                _TK_ROOT = _root  # noqa: F841
+
+                sys.argv = [sys.argv[0], "edit", _path]
+
+            elif len(sys.argv) >= 2 and sys.argv[1] not in _CLICK_CMDS:
+                # Case 2: file path(s) injected by Apple Events / argv_emulation
+                # — they arrived without the "edit" subcommand prefix.
+                sys.argv = [sys.argv[0], "edit"] + sys.argv[1:]
+
         cli()
     except SystemExit:
         raise   # let Click's normal exit codes through
