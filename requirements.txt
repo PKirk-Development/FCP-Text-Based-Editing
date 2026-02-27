@@ -1,0 +1,28 @@
+# ── Desktop GUI ───────────────────────────────────────────────────────────────
+customtkinter>=5.2.0       # modern dark-theme tkinter widgets
+Pillow>=10.0.0             # PIL — video frame rendering in canvas
+
+# ── Video playback (development / cross-platform) ─────────────────────────────
+# On production macOS: replace with AVFoundation via PyObjC (see MACOS_ROADMAP)
+opencv-python>=4.8.0       # OpenCV — frame-by-frame video decoding
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+click>=8.1.0
+rich>=13.7.0               # coloured terminal output during processing
+
+# ── Audio analysis ────────────────────────────────────────────────────────────
+pydub>=0.25.1              # 1 ms-precision silence detection (seek_step=1)
+numpy>=1.24.0              # waveform peak/RMS computation
+
+# ── Transcription (required for .mp4 workflow) ────────────────────────────────
+# openai-whisper requires PyTorch.
+# Apple Silicon (M1/M2/M3/M4):
+#   pip install torch torchvision torchaudio
+# Then install Whisper:
+openai-whisper>=20231117
+
+# ── Video processing / export ─────────────────────────────────────────────────
+ffmpeg-python>=0.2.0       # FFmpeg Python bindings
+                           # Also install ffmpeg binary:
+                           #   macOS:  brew install ffmpeg
+                           #   Linux:  apt install ffmpeg

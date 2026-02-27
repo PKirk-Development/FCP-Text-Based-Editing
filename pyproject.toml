@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+# ── Project metadata ──────────────────────────────────────────────────────────
+[project]
+name            = "fcp-text-editor"
+version         = "0.1.0"
+description     = "Text-based video editing tool for Final Cut Pro — silence cutting, transcript editing, Um-Checker"
+readme          = "README.md"
+license         = { text = "Proprietary" }
+requires-python = ">=3.10"
+
+keywords = [
+    "final-cut-pro", "video-editing", "text-based-editing",
+    "transcription", "whisper", "fcpxml", "silence-detection",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+]
+
+dependencies = [
+    "customtkinter>=5.2.0",
+    "Pillow>=10.0.0",
+    "opencv-python>=4.8.0",
+    "click>=8.1.0",
+    "rich>=13.7.0",
+    "pydub>=0.25.1",
+    "numpy>=1.24.0",
+    "ffmpeg-python>=0.2.0",
+]
+
+[project.optional-dependencies]
+whisper = [
+    "openai-whisper>=20231117",
+    # PyTorch installed separately (platform-specific):
+    # Apple Silicon: pip install torch torchvision torchaudio
+]
+
+[project.scripts]
+fcp-edit = "main:cli"
+
+# ── Package discovery ─────────────────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+# ── PyInstaller macOS app bundle configuration ────────────────────────────────
+# To build a standalone .app:
+#   pip install pyinstaller
+#   pyinstaller fcp_editor.spec
+#
+# See fcp_editor.spec (to be generated) for full bundle config.
+#
+# Future: py2app is the preferred macOS bundler for distributing on the App Store.
+#   pip install py2app
+#   python setup.py py2app
+#
+[tool.py2app]
+# py2app options (used via setup.py when targeting App Store / Notarization)
+# These are set in setup.py OPTIONS dict for now; kept here for reference.
+
+# ── Ruff linter (development) ─────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]   # line length handled by formatter
+
+# ── pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
