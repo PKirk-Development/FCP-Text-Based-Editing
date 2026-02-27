@@ -43,7 +43,14 @@ def extract_audio(
         "-ac",       "1",             # mono
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg not found.\n"
+            "macOS app: rebuild with build_macos.sh (it bundles ffmpeg).\n"
+            "Command line: brew install ffmpeg"
+        )
     if result.returncode != 0:
         raise RuntimeError(
             f"FFmpeg audio extraction failed:\n{result.stderr[-2000:]}"
@@ -62,7 +69,14 @@ def get_video_info(video_path: str) -> dict:
         "-show_streams", "-show_format",
         video_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffprobe not found.\n"
+            "macOS app: rebuild with build_macos.sh (it bundles ffmpeg/ffprobe).\n"
+            "Command line: brew install ffmpeg"
+        )
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed:\n{result.stderr[-1000:]}")
 
