@@ -270,6 +270,10 @@ def _launch_editor(project: "Project") -> None:  # type: ignore[name-defined]
     """Open the CustomTkinter desktop GUI."""
     from src.editor import TextEditor
     app = TextEditor(project)
+    # Register the editor as the Tk root so the crash handler can attach a
+    # Toplevel to it if an unhandled exception occurs inside the editor.
+    # ctk.CTk is a tkinter.Tk subclass — it is the one and only Tk instance.
+    _TK.root = app
     app.mainloop()
 
 
@@ -471,37 +475,31 @@ if __name__ == "__main__":
             _CLICK_CMDS = {"edit", "process", "export", "models", "--help", "-h"}
 
             if len(sys.argv) == 1:
-                # Case 1: no file — show a native open-file dialog.
-                # IMPORTANT: keep _root alive via _TK — on macOS
-                # PyInstaller, calling tk.Tk() a second time after destroy()
-                # is fatal.  All later windows (progress, crash reporter)
-                # use Toplevel(_TK.root) as their parent.
-                import tkinter as tk
-                from tkinter import filedialog
+                # Case 1: no file — show a native macOS open-file dialog.
+                #
+                # We use osascript (AppleScript) instead of tkinter.filedialog
+                # to avoid creating a tk.Tk() root here.  On macOS PyInstaller,
+                # having two simultaneous tk.Tk() instances is fatal, and
+                # TextEditor (ctk.CTk, which subclasses tk.Tk) must be the one
+                # and only Tk instance in the process.  A preliminary tk.Tk()
+                # kept alive alongside the editor is the exact cause of the
+                # instant crash seen when opening any file.
+                import subprocess as _sp
 
-                _root = tk.Tk()
-                _root.withdraw()
-                _root.call("wm", "attributes", ".", "-topmost", True)
-
-                _path = filedialog.askopenfilename(
-                    title="Open Video, FCPXML, or Project",
-                    filetypes=[
-                        ("Supported files",
-                         "*.mp4 *.mov *.mxf *.MP4 *.MOV *.fcpxml *.fte.json"),
-                        ("Video files",              "*.mp4 *.mov *.mxf *.MP4 *.MOV"),
-                        ("Final Cut Pro XML",        "*.fcpxml"),
-                        ("FCP Text Editor project",  "*.fte.json"),
-                        ("All files",                "*"),
-                    ],
+                _picker_result = _sp.run(
+                    ["osascript", "-e",
+                     "try\n"
+                     "    set _f to choose file"
+                     " with prompt \"Open a video, FCPXML, or project file\"\n"
+                     "    POSIX path of _f\n"
+                     "on error\n"
+                     "    \"\"\n"
+                     "end try"],
+                    capture_output=True, text=True,
                 )
-
-                if not _path:
-                    _root.destroy()
-                    sys.exit(0)   # user cancelled — quit cleanly
-
-                # Keep the root alive via the module-level holder so that
-                # _ProgressWindow and the crash reporter can use Toplevel.
-                _TK.root = _root  # noqa: F841
+                _path = _picker_result.stdout.strip()
+                if not _path or not Path(_path).is_file():
+                    sys.exit(0)   # user cancelled or path invalid — quit cleanly
 
                 sys.argv = [sys.argv[0], "edit", _path]
 
