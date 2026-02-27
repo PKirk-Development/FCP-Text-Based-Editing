@@ -161,6 +161,139 @@ you can adjust it freely without re-running the audio analysis.
 
 ---
 
+## Building the App (making a .dmg to share)
+
+> Follow these steps exactly. You only have to do this once to get the app built — after that you can just share the .dmg file with anyone.
+
+---
+
+### Step 1 — Get the code onto your Mac
+
+If you haven't already, clone this repo:
+
+```
+git clone <repo-url>
+cd FCP-Text-Based-Editing
+```
+
+---
+
+### Step 2 — Install Homebrew (if you don't have it)
+
+Homebrew is like an app store for developer tools. Open **Terminal** (search for it in Spotlight) and paste this:
+
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+It will ask for your Mac password. Type it and press Enter (you won't see the letters — that's normal). Wait for it to finish.
+
+---
+
+### Step 3 — Install Python 3.11
+
+```
+brew install python@3.11
+```
+
+Wait for it to finish.
+
+---
+
+### Step 4 — Install ffmpeg
+
+ffmpeg is the tool that actually cuts the video. Run:
+
+```
+brew install ffmpeg
+```
+
+Wait for it to finish. This one can take a few minutes.
+
+---
+
+### Step 5 — Make the build script runnable
+
+You only need to do this once:
+
+```
+chmod +x build_macos.sh packaging/create_dmg.sh packaging/make_icon.sh
+```
+
+---
+
+### Step 6 — Build the app
+
+Run this one command. It does everything automatically (creates a virtual environment, installs all the Python packages, bundles everything into a .app):
+
+```
+./build_macos.sh --dmg
+```
+
+You'll see a bunch of text scrolling by. **This is normal.** It takes about 3–5 minutes. When it's done you'll see a big green "Build complete" box.
+
+> **Want to include Whisper** (so the app can transcribe raw video files, not just FCPXML)?
+> This makes the download much larger (~1.5 GB) but adds transcription.
+> Run this instead:
+> ```
+> ./build_macos.sh --with-whisper --dmg
+> ```
+
+---
+
+### Step 7 — Find your finished files
+
+When the build finishes, look in the `dist/` folder inside the project:
+
+```
+dist/
+├── FCP Text Editor.app        ← the app — double-click to test it
+└── FCP-Text-Editor-0.1.0.dmg  ← share THIS file with people
+```
+
+Double-click `FCP Text Editor.app` to make sure it works on your machine first.
+
+---
+
+### Step 8 — Share it
+
+Send the `.dmg` file to whoever needs it. They just:
+1. Double-click the `.dmg`
+2. Drag `FCP Text Editor` into their Applications folder
+3. Double-click it to open
+
+> **Heads up:** If the person you send it to gets a warning saying *"Apple can't check this app for malicious software"*, they need to:
+> Right-click the app → click **Open** → click **Open** again.
+> It'll work fine after that. (This happens because the app isn't signed with a paid Apple Developer account yet.)
+
+---
+
+### Adding your own app icon (optional)
+
+1. Make a square image (ideally 1024×1024 pixels) — a PNG works great
+2. Run:
+   ```
+   ./packaging/make_icon.sh path/to/your-image.png
+   ```
+3. Then rebuild:
+   ```
+   ./build_macos.sh --dmg
+   ```
+
+---
+
+### If something goes wrong
+
+| Problem | Fix |
+|---|---|
+| `command not found: brew` | Go back to Step 2 |
+| `command not found: python3.11` | Go back to Step 3 |
+| `ffmpeg not found` | Go back to Step 4 |
+| `permission denied: ./build_macos.sh` | Go back to Step 5 |
+| Build fails with a Python error | Run `./build_macos.sh --clean --dmg` to start fresh |
+
+---
+
 ## Architecture & commercial macOS roadmap
 
 The codebase is structured for future distribution as a standalone **macOS
