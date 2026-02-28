@@ -26,3 +26,16 @@ ffmpeg-python>=0.2.0       # FFmpeg Python bindings
                            # Also install ffmpeg binary:
                            #   macOS:  brew install ffmpeg
                            #   Linux:  apt install ffmpeg
+
+# ── Audio playback (optional — video preview audio) ──────────────────────────
+# pygame is used for real-time audio playback during video preview.
+# pygame 2.x ships pre-built wheels for Python 3.10–3.12 on macOS arm64.
+#
+# If you are on Python 3.13+ OR pip attempts to build from source, install
+# the SDL2 libraries first so that compilation succeeds:
+#
+#   brew install sdl2 sdl2_image sdl2_mixer sdl2_ttf portmidi
+#   pip install pygame>=2.5.2
+#
+# Then uncomment the line below:
+# pygame>=2.5.2

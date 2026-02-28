@@ -42,6 +42,12 @@ whisper = [
     # PyTorch installed separately (platform-specific):
     # Apple Silicon: pip install torch torchvision torchaudio
 ]
+# Audio playback for video preview (uses pygame.mixer).
+# Requires SDL2 on macOS if a pre-built wheel is unavailable:
+#   brew install sdl2 sdl2_image sdl2_mixer sdl2_ttf portmidi
+audio = [
+    "pygame>=2.5.2",
+]
 
 [project.scripts]
 fcp-edit = "main:cli"

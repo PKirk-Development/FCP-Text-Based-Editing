@@ -4,10 +4,11 @@
 # ──────────────────────────────────────────────────────────────────────────────
 #
 # Usage:
-#   ./build_macos.sh                         # Lite build  (no Whisper, ~150 MB)
-#   ./build_macos.sh --with-whisper          # Full build  (with Whisper, ~1.5 GB)
-#   ./build_macos.sh --sign "Developer ID"  # Sign for Gatekeeper distribution
-#   ./build_macos.sh --dmg                   # Create distributable .dmg after build
+#   ./build_macos.sh                                   # Lite build  (no Whisper, ~150 MB)
+#   ./build_macos.sh --with-whisper                    # Full build  (with Whisper, ~1.5 GB)
+#   ./build_macos.sh --with-audio                      # Include pygame audio playback
+#   ./build_macos.sh --sign "Developer ID"            # Sign for Gatekeeper distribution
+#   ./build_macos.sh --dmg                             # Create distributable .dmg after build
 #   ./build_macos.sh --with-whisper --sign "Developer ID Application: Your Name (TEAMID)" --dmg
 #
 # What this script does:
@@ -41,6 +42,7 @@ step()  { echo -e "\n${BLD}${CYN}── $* ────────────�
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 WITH_WHISPER=0
+WITH_AUDIO=0
 SIGN_IDENTITY=""
 CREATE_DMG=0
 CLEAN=0
@@ -48,6 +50,7 @@ CLEAN=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --with-whisper)  WITH_WHISPER=1       ;;
+        --with-audio)    WITH_AUDIO=1         ;;
         --sign)          SIGN_IDENTITY="$2"; shift ;;
         --dmg)           CREATE_DMG=1         ;;
         --clean)         CLEAN=1              ;;
@@ -74,6 +77,7 @@ cd "$REPO_DIR"
 echo -e "\n${BLD}FCP Text-Based Editor — macOS App Builder${RST}"
 echo -e "  Version     : ${VERSION}"
 echo -e "  Whisper     : $([ $WITH_WHISPER -eq 1 ] && echo 'YES (full build ~1.5 GB)' || echo 'NO  (lite build ~150 MB)')"
+echo -e "  Audio       : $([ $WITH_AUDIO   -eq 1 ] && echo 'YES (pygame audio playback)' || echo 'NO')"
 echo -e "  Sign        : ${SIGN_IDENTITY:-'(none — not signed)'}"
 echo -e "  Create DMG  : $([ $CREATE_DMG -eq 1 ] && echo 'YES' || echo 'NO')"
 echo
@@ -182,6 +186,40 @@ if [[ $WITH_WHISPER -eq 1 ]]; then
     info "Installing Whisper…"
     "$VPIP" install --quiet "openai-whisper>=20231117"
     ok "Whisper installed"
+fi
+
+if [[ $WITH_AUDIO -eq 1 ]]; then
+    step "Installing audio playback support (pygame)"
+
+    # pygame requires SDL2 libraries to compile from source.
+    # On Python 3.10–3.12 arm64, a pre-built wheel is usually available and
+    # SDL2 is not needed.  On Python 3.13+ (or when no wheel matches), pip
+    # falls back to source compilation and SDL2 must be present.
+    BREW_BIN=$(command -v brew 2>/dev/null || true)
+    if [[ -z "$BREW_BIN" ]]; then
+        warn "Homebrew not found — cannot auto-install SDL2."
+        warn "If pygame fails to build, install Homebrew then run:"
+        warn "  brew install sdl2 sdl2_image sdl2_mixer sdl2_ttf portmidi"
+    else
+        SDL2_PREFIX=$("$BREW_BIN" --prefix sdl2 2>/dev/null || true)
+        if [[ -z "$SDL2_PREFIX" ]]; then
+            info "SDL2 not found — installing via Homebrew…"
+            "$BREW_BIN" install --quiet sdl2 sdl2_image sdl2_mixer sdl2_ttf portmidi
+            ok "SDL2 libraries installed"
+        else
+            ok "SDL2 already installed: $SDL2_PREFIX"
+        fi
+    fi
+
+    info "Installing pygame>=2.5.2…"
+    # Try binary wheel first; fall back to source if brew provided SDL2.
+    if "$VPIP" install --quiet --only-binary=:all: "pygame>=2.5.2" 2>/dev/null; then
+        ok "pygame installed (pre-built wheel)"
+    else
+        info "No pre-built wheel found — building pygame from source (SDL2 required)…"
+        "$VPIP" install --quiet "pygame>=2.5.2"
+        ok "pygame installed (built from source)"
+    fi
 fi
 
 # ── Step 4: Clean previous build ─────────────────────────────────────────────
