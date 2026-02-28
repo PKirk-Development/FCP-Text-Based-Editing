@@ -182,6 +182,15 @@ app = BUNDLE(
                 "LSHandlerRank":          "Alternate",
             },
             {
+                "CFBundleTypeName":       "Final Cut Pro XML Package",
+                "CFBundleTypeExtensions": ["fcpxmld"],
+                "CFBundleTypeRole":       "Editor",
+                "LSHandlerRank":          "Alternate",
+                # fcpxmld is a directory package; this flag lets Launch Services
+                # treat it as a document rather than a folder.
+                "LSTypeIsPackage":        True,
+            },
+            {
                 "CFBundleTypeName":       "Movie File",
                 "CFBundleTypeExtensions": ["mp4", "mov", "MP4", "MOV", "mxf"],
                 "CFBundleTypeRole":       "Viewer",

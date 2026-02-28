@@ -125,6 +125,19 @@ class FCPXMLProject:
     # ── Internal parsing ──────────────────────────────────────────────────────
 
     def _parse(self, path: str) -> None:
+        # .fcpxmld is a macOS package (a directory that Finder shows as a file).
+        # The actual XML lives at Info.fcpxml inside the package.
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.is_dir():
+            inner = p / "Info.fcpxml"
+            if not inner.exists():
+                raise ValueError(
+                    f"'{p.name}' looks like an FCPXML package but contains no "
+                    f"Info.fcpxml.  Make sure Final Cut Pro finished exporting."
+                )
+            path = str(inner)
+
         tree = ET.parse(path)
         self.raw_tree = tree
         root = tree.getroot()
