@@ -484,10 +484,19 @@ if __name__ == "__main__":
                 # and only Tk instance in the process.  A preliminary tk.Tk()
                 # kept alive alongside the editor is the exact cause of the
                 # instant crash seen when opening any file.
+                #
+                # argv_emulation is disabled in the PyInstaller spec (it uses
+                # deprecated Carbon APIs that cause a double-dock-icon bug on
+                # macOS 13+), so Apple Events / "Open With" events will also
+                # reach this branch rather than populating sys.argv directly.
                 import subprocess as _sp
 
                 _picker_result = _sp.run(
                     ["osascript", "-e",
+                     # activate brings the dialog to the front on macOS 13+;
+                     # without it the choose-file sheet can open behind other
+                     # windows and appear invisible to the user.
+                     "activate\n"
                      "try\n"
                      "    set _f to choose file"
                      " with prompt \"Open a video, FCPXML, or project file\"\n"
