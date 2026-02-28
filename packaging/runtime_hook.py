@@ -13,7 +13,9 @@ are handled:
    PyInstaller compiles .py files to bytecode and does not embed the
    original source, so inspect.findsource() raises OSError for frozen
    modules.  This surfaces as an ImportError via torch's import chain.
-   Fix: catch OSError and return "" / ([], 0).
+   Fix: catch OSError and return a minimal stub for callables (returning
+   "" / ([], 0) causes torch._sources.parse_def to get an empty AST and
+   re-raise the same RuntimeError).
 
 2. Whole-file fallback (start == 0, many lines, called on a function)
    When the bundled .py files ARE present (e.g. in Contents/Frameworks/)
@@ -42,12 +44,24 @@ if getattr(sys, "frozen", False):
         try:
             return _orig_getsource(obj)
         except OSError:
+            # No source available; return a minimal stub for callables so
+            # callers like torch._sources.parse_def get a valid single-function
+            # AST instead of an empty string that fails ast.parse validation.
+            if callable(obj):
+                name = getattr(obj, "__name__", None) or "f"
+                return f"def {name}(*args, **kwargs): pass\n"
             return ""
 
     def _safe_getsourcelines(obj):
         try:
             lines, start = _orig_getsourcelines(obj)
         except OSError:
+            # No source available.  Return a stub for callables — returning
+            # ([], 0) would cause torch._sources.parse_def to receive an empty
+            # string, produce an empty AST, and re-raise RuntimeError.
+            if callable(obj):
+                name = getattr(obj, "__name__", None) or "f"
+                return [f"def {name}(*args, **kwargs): pass\n"], 0
             return [], 0
 
         # Detect "whole-file" fallback: findsource returns (all_lines, 0)
@@ -56,10 +70,13 @@ if getattr(sys, "frozen", False):
         # co_firstlineno doesn't anchor the backwards scan correctly.
         # Return a minimal stub so callers like torch.parse_def see exactly
         # one top-level function and don't raise RuntimeError.
+        #
+        # The hasattr(__code__) guard was intentionally removed: some callables
+        # (e.g. Cython-compiled or C-extension wrappers) are callable but lack
+        # __code__, yet still cause parse_def to fail in the same way.
         if (start == 0
                 and len(lines) > 20
-                and callable(obj)
-                and hasattr(obj, "__code__")):
+                and callable(obj)):
             name = getattr(obj, "__name__", None) or "f"
             return [f"def {name}(*args, **kwargs): pass\n"], 0
 
