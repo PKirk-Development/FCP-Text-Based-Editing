@@ -138,6 +138,7 @@ class WaveformView:
         self._project:  Optional[Project] = None
         self._zoom_start = 0.0          # visible window start (seconds)
         self._zoom_end   = data.duration # visible window end   (seconds)
+        self._playhead_id: Optional[int] = None  # canvas item id for the playhead line
 
         canvas.bind("<ButtonPress-1>",   self._on_click)
         canvas.bind("<B1-Motion>",       self._on_drag)
@@ -150,6 +151,30 @@ class WaveformView:
 
     def set_playhead(self, time_s: float) -> None:
         self._playhead = time_s
+
+    def move_playhead(self, time_s: float) -> None:
+        """Move only the playhead line without redrawing the entire canvas.
+
+        Call this every frame during playback instead of draw().  A full
+        draw() is only needed when the segment/deleted overlay changes.
+        """
+        self._playhead = time_s
+        c = self._canvas
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 2 or h < 2:
+            return
+        px = self._t_to_px(time_s, w)
+        if self._playhead_id is not None:
+            try:
+                c.coords(self._playhead_id, px, 0, px, h)
+                return
+            except Exception:
+                self._playhead_id = None
+        # Item was deleted (e.g. after a full draw()); recreate it.
+        self._playhead_id = c.create_line(
+            px, 0, px, h, fill=self.PLAYHEAD_COLOR, width=2, tags="playhead",
+        )
 
     def zoom_to(self, start_s: float, end_s: float) -> None:
         self._zoom_start = max(0.0, start_s)
@@ -177,6 +202,7 @@ class WaveformView:
             return
 
         c.delete("all")
+        self._playhead_id = None   # reset — recreated at end of this method
 
         # Background
         c.create_rectangle(0, 0, w, h, fill=self.BG_COLOR, outline="")
@@ -239,8 +265,9 @@ class WaveformView:
         # ── Playhead ──────────────────────────────────────────────────────
         px = self._t_to_px(self._playhead, w)
         if 0 <= px < w:
-            c.create_line(px, 0, px, h,
-                          fill=self.PLAYHEAD_COLOR, width=2)
+            self._playhead_id = c.create_line(
+                px, 0, px, h, fill=self.PLAYHEAD_COLOR, width=2, tags="playhead",
+            )
 
         # ── Time labels ───────────────────────────────────────────────────
         self._draw_time_labels(c, w, h, vis_dur)

@@ -125,7 +125,11 @@ exe = EXE(
     upx=True,
     console=False,              # No terminal window
     disable_windowed_traceback=False,
-    argv_emulation=True,        # Convert Apple Events (file open) → sys.argv
+    argv_emulation=False,       # Disabled: Carbon argv_emulation is deprecated on
+                                # macOS 13+ and causes the app to appear as two dock
+                                # icons on launch.  File-open events are handled via
+                                # the osascript file picker (no-args case) and the
+                                # sys.argv injection below (CLI / Apple Events case).
     target_arch="arm64",        # Native M-series; change to "universal2" for Intel+Apple
     codesign_identity=None,     # Passed via --codesign-identity flag or CODESIGN_ID env
     entitlements_file=ENTITLEMENTS,
@@ -176,6 +180,15 @@ app = BUNDLE(
                 "CFBundleTypeExtensions": ["fcpxml"],
                 "CFBundleTypeRole":       "Editor",
                 "LSHandlerRank":          "Alternate",
+            },
+            {
+                "CFBundleTypeName":       "Final Cut Pro XML Package",
+                "CFBundleTypeExtensions": ["fcpxmld"],
+                "CFBundleTypeRole":       "Editor",
+                "LSHandlerRank":          "Alternate",
+                # fcpxmld is a directory package; this flag lets Launch Services
+                # treat it as a document rather than a folder.
+                "LSTypeIsPackage":        True,
             },
             {
                 "CFBundleTypeName":       "Movie File",

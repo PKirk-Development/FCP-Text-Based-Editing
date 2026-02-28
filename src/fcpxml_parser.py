@@ -1,13 +1,13 @@
 """
 FCPXML parser for FCP 11's "Transcribe to Captions" workflow.
 
-Supports FCPXML versions 1.8 – 1.11.
+Supports FCPXML versions 1.8 – 1.14 (all versions exported by FCP 10.6–10.8+).
 
 Workflow
 --------
-1. In FCP 11: Clip → Transcribe to Captions  (requires Apple Silicon + Sequoia)
-2. File → Export XML…  (choose FCPXML)
-3. Run: python main.py edit project.fcpxml
+1. In FCP 11: Clip → Transcribe to Captions  (requires Apple Silicon + macOS Sequoia)
+2. File → Export XML…  (choose FCPXML 1.11, 1.12, 1.13, or 1.14 — all work)
+3. Open the .fcpxml file in FCP Text Editor
 
 The parser extracts:
   • The source video asset path
@@ -125,6 +125,19 @@ class FCPXMLProject:
     # ── Internal parsing ──────────────────────────────────────────────────────
 
     def _parse(self, path: str) -> None:
+        # .fcpxmld is a macOS package (a directory that Finder shows as a file).
+        # The actual XML lives at Info.fcpxml inside the package.
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if p.is_dir():
+            inner = p / "Info.fcpxml"
+            if not inner.exists():
+                raise ValueError(
+                    f"'{p.name}' looks like an FCPXML package but contains no "
+                    f"Info.fcpxml.  Make sure Final Cut Pro finished exporting."
+                )
+            path = str(inner)
+
         tree = ET.parse(path)
         self.raw_tree = tree
         root = tree.getroot()
@@ -211,14 +224,17 @@ class FCPXMLProject:
             if duration_s <= 0:
                 continue
 
-            # Text comes from child <text> element(s)
+            # Text comes from child <text> element(s).
+            # In FCPXML 1.12+ FCP wraps the actual string in <text-style>
+            # children, so text_el.text is None.  itertext() collects all
+            # text nodes at any depth, handling both old and new layouts.
             texts = []
             for text_el in _find_all(cap, "text"):
-                t = (text_el.text or "").strip()
+                t = "".join(text_el.itertext()).strip()
                 if t:
                     texts.append(t)
             if not texts:
-                # Fall back to the name attribute
+                # Fall back to the name attribute (always populated by FCP)
                 name = cap.get("name", "").strip()
                 if name:
                     texts = [name]
