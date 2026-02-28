@@ -61,7 +61,10 @@ else
     ln -sf /Applications "$STAGE_DIR/Applications"
 
     APP_SIZE_KB=$(du -sk "$APP_PATH" | awk '{print $1}')
-    DMG_SIZE_KB=$(( APP_SIZE_KB + 10240 ))   # 10 MB padding
+    # Add 25% overhead for HFS+ metadata + a 50 MB minimum buffer.
+    # A flat 10 MB is far too small for large bundles (e.g. PyTorch/Whisper
+    # ~600 MB with thousands of files whose catalog entries alone exceed 10 MB).
+    DMG_SIZE_KB=$(( APP_SIZE_KB + APP_SIZE_KB / 4 + 51200 ))
 
     info "Creating ${DMG_SIZE_KB} KB DMG image…"
 
