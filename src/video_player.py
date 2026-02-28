@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import threading
@@ -192,19 +193,13 @@ class OpenCVPlayer(AbstractVideoPlayer):
         self._cap.set(self._cv2.CAP_PROP_POS_MSEC, time_s * 1000.0)
         self._current_time = time_s
         self._display_frame_at(time_s, read_next=True)
-        # Re-cue audio: restart from the new position so it stays in sync.
-        if self._mixer and self._audio_tmp:
+        # Re-cue audio only if already playing; if paused, play() will read
+        # _current_time and start from there when resumed.
+        if was_playing and self._mixer and self._audio_tmp:
             try:
-                if was_playing:
-                    self._mixer.music.play(start=time_s)
-                else:
-                    # Load position so that the next play() starts correctly.
-                    # pygame.mixer has no "seek without playing"; we play then
-                    # immediately pause to land at the right offset.
-                    self._mixer.music.play(start=time_s)
-                    self._mixer.music.pause()
-            except Exception:
-                pass
+                self._mixer.music.play(start=time_s)
+            except Exception as e:
+                print(f"[audio] seek failed: {e}", file=sys.stderr)
 
     def play(self) -> None:
         if self._playing or self._cap is None:
@@ -212,14 +207,9 @@ class OpenCVPlayer(AbstractVideoPlayer):
         self._playing = True
         if self._mixer and self._audio_tmp:
             try:
-                # If paused (e.g. after a seek-while-paused) unpause;
-                # otherwise start fresh from current position.
-                if self._mixer.music.get_busy():
-                    self._mixer.music.unpause()
-                else:
-                    self._mixer.music.play(start=self._current_time)
-            except Exception:
-                pass
+                self._mixer.music.play(start=self._current_time)
+            except Exception as e:
+                print(f"[audio] play failed: {e}", file=sys.stderr)
         self._play_thread = threading.Thread(
             target=self._play_loop, daemon=True, name="VideoPlayThread"
         )
@@ -272,36 +262,42 @@ class OpenCVPlayer(AbstractVideoPlayer):
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _init_pygame_mixer(self) -> None:
-        """Initialise pygame.mixer; silently skip if pygame is not installed."""
+        """Initialise pygame.mixer; skip if pygame is not installed."""
         try:
             import pygame.mixer as mixer
             mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
             self._mixer = mixer
-        except Exception:
+            print("[audio] pygame.mixer ready", file=sys.stderr)
+        except Exception as e:
+            print(f"[audio] pygame.mixer init failed: {e}", file=sys.stderr)
             self._mixer = None
 
     def _extract_audio(self, video_path: str) -> None:
         """
-        Extract audio track from *video_path* into a temporary WAV file and
-        load it into pygame.mixer.music.  No-op if pygame is unavailable or
-        the video has no audio stream.
+        Extract audio track from *video_path* into a temporary OGG file and
+        load it into pygame.mixer.music.
+
+        OGG is used because pygame.mixer.music.play(start=seconds) only
+        supports time-based seeking for OGG and MP3; WAV raises
+        NotImplementedError for any non-zero start position.
         """
         if self._mixer is None:
             return
 
         self._delete_audio_tmp()
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
         tmp.close()
         try:
             result = subprocess.run(
                 [
                     "ffmpeg", "-y",
                     "-i", video_path,
-                    "-vn",                   # strip video
-                    "-acodec", "pcm_s16le",  # 16-bit PCM — pygame.mixer native
+                    "-vn",                    # strip video
+                    "-acodec", "libvorbis",   # OGG Vorbis — supports seek
                     "-ar", "44100",
-                    "-ac", "2",              # stereo
+                    "-ac", "2",               # stereo
+                    "-q:a", "4",              # quality level (0–10, 4 ≈ 128 kbps)
                     tmp.name,
                 ],
                 capture_output=True,
@@ -310,10 +306,13 @@ class OpenCVPlayer(AbstractVideoPlayer):
             if result.returncode == 0:
                 self._mixer.music.load(tmp.name)
                 self._audio_tmp = tmp.name
+                print(f"[audio] extracted → {tmp.name}", file=sys.stderr)
             else:
-                # Video has no audio track or ffmpeg failed — that's fine.
+                err = result.stderr.decode(errors="replace").strip().splitlines()
+                print(f"[audio] ffmpeg failed (no audio stream?): {err[-1] if err else 'unknown'}", file=sys.stderr)
                 os.unlink(tmp.name)
-        except Exception:
+        except Exception as e:
+            print(f"[audio] extraction error: {e}", file=sys.stderr)
             try:
                 os.unlink(tmp.name)
             except OSError:
