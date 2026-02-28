@@ -174,6 +174,10 @@ class TextEditor(ctk.CTk):
         # Video player (OpenCVPlayer, loaded async)
         self._player                 = None
         self._photo_image            = None   # hold PIL reference to prevent GC
+        # Frame-drop flags: prevent after(0,...) backlog when main thread is slow
+        self._frame_pending          = False  # True = a frame render is queued
+        self._time_pending           = False  # True = a playhead update is queued
+        self._pending_time           = 0.0    # latest time from player thread
 
         # Waveform
         self._waveform_data          = None
@@ -466,9 +470,18 @@ class TextEditor(ctk.CTk):
 
         settings = self.project.silence_settings
 
+        # _seg_style tracks the currently-applied style tag for each segment so
+        # _refresh_seg can remove only that one tag instead of all 14 style tags.
+        self._seg_style: list[str] = []
+
+        # Invalidate binary-search caches used by _highlight_current_seg.
+        self._seg_starts_cache = None
+        self._last_highlight_seg = -1
+
         for i, seg in enumerate(self.project.segments):
             seg_tag   = f"seg_{i}"
             style_tag = self._style_tag(seg, i, settings)
+            self._seg_style.append(style_tag)
 
             if isinstance(seg, TextSegment):
                 content = seg.text + " "
@@ -481,7 +494,12 @@ class TextEditor(ctk.CTk):
         t.mark_set("insert", "1.0")
 
     def _refresh_seg(self, idx: int) -> None:
-        """Reapply the correct style tag to one segment (after state change)."""
+        """Reapply the correct style tag to one segment (after state change).
+
+        Uses _seg_style to remove only the one currently-applied style tag
+        instead of issuing 14 tag_remove calls.  That reduces the per-segment
+        cost from 15 tkinter operations down to 2.
+        """
         t       = self._text
         seg_tag = f"seg_{idx}"
         ranges  = t.tag_ranges(seg_tag)
@@ -489,12 +507,21 @@ class TextEditor(ctk.CTk):
             return
         start, end = str(ranges[0]), str(ranges[1])
 
-        for tag in _STYLE_TAGS:
-            t.tag_remove(tag, start, end)
-
         seg       = self.project.segments[idx]
-        style_tag = self._style_tag(seg, idx, self.project.silence_settings)
-        t.tag_add(style_tag, start, end)
+        new_tag   = self._style_tag(seg, idx, self.project.silence_settings)
+
+        seg_style = getattr(self, "_seg_style", None)
+        if seg_style is not None and idx < len(seg_style):
+            old_tag = seg_style[idx]
+            if old_tag != new_tag:
+                t.tag_remove(old_tag, start, end)
+                t.tag_add(new_tag, start, end)
+                seg_style[idx] = new_tag
+        else:
+            # Fallback: _seg_style not populated yet (shouldn't normally happen)
+            for tag in _STYLE_TAGS:
+                t.tag_remove(tag, start, end)
+            t.tag_add(new_tag, start, end)
 
     def _style_tag(self, seg: Segment, idx: int, settings: SilenceSettings) -> str:
         """Determine the correct style tag name given the segment's current state."""
@@ -743,6 +770,7 @@ class TextEditor(ctk.CTk):
         """Mark all long detected silences as deleted."""
         settings = self.project.silence_settings
         self._push_undo()
+        changed: set[int] = set()
         for i, seg in enumerate(self.project.segments):
             if (
                 isinstance(seg, Silence)
@@ -750,8 +778,11 @@ class TextEditor(ctk.CTk):
                 and seg.duration >= settings.min_duration
                 and seg.deletable_range(settings.buffer) is not None
             ):
-                self.deleted.add(i)
-        for i in range(len(self.project.segments)):
+                if i not in self.deleted:
+                    self.deleted.add(i)
+                    changed.add(i)
+        # Only refresh the segments whose state actually changed.
+        for i in changed:
             self._refresh_seg(i)
         self._sync_project()
         self._update_status()
@@ -817,6 +848,17 @@ class TextEditor(ctk.CTk):
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def _on_setting_change(self, _=None) -> None:
+        # Debounce: cancel any pending refresh and reschedule 150 ms out so
+        # rapid spinbox clicks don't re-style every silence segment on each tick.
+        if getattr(self, "_setting_change_id", None) is not None:
+            try:
+                self.after_cancel(self._setting_change_id)
+            except Exception:
+                pass
+        self._setting_change_id = self.after(150, self._apply_setting_change)
+
+    def _apply_setting_change(self) -> None:
+        self._setting_change_id = None
         try:
             thresh = self._thresh_spin.get()
             buf    = max(0.001, self._buffer_spin.get())
@@ -986,15 +1028,37 @@ class TextEditor(ctk.CTk):
         self._waveform_view.draw(project=self.project, playhead_s=0.0)
 
     def _on_frame(self, frame_rgb, time_s: float) -> None:
-        """Called from OpenCVPlayer's play thread — schedule display on main thread."""
+        """Called from player thread — drop frame if main thread hasn't rendered the last one.
+
+        Without this guard, after(0,...) creates an unbounded backlog when the
+        main thread is slower than the video frame rate.  The queue fills up
+        with dozens of pending PIL-resize + PhotoImage operations, making the
+        UI completely unresponsive until it drains.
+        """
+        if self._frame_pending:
+            return   # drop — main thread is still processing the previous frame
+        self._frame_pending = True
         self.after(0, lambda: self._display_frame(frame_rgb, time_s))
 
     def _on_time(self, time_s: float) -> None:
-        """Called from OpenCVPlayer's play thread — schedule playhead update."""
-        self.after(0, lambda: self._update_playhead(time_s))
+        """Called from player thread — coalesce rapid updates into one main-thread call.
+
+        Store the latest timestamp and schedule a single flush; any intermediate
+        values received before the flush are discarded so the queue never backs up.
+        """
+        self._pending_time = time_s
+        if not self._time_pending:
+            self._time_pending = True
+            self.after(0, self._flush_time_update)
+
+    def _flush_time_update(self) -> None:
+        self._time_pending = False
+        self._update_playhead(self._pending_time)
 
     def _display_frame(self, frame_rgb, time_s: float) -> None:
         """Render a numpy RGB frame into the video canvas (aspect-ratio preserving)."""
+        self._frame_pending = False   # allow _on_frame to queue the next frame
+
         try:
             from PIL import Image, ImageTk
         except ImportError:
@@ -1013,14 +1077,22 @@ class TextEditor(ctk.CTk):
         nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
         ox, oy = (cw - nw) // 2, (ch - nh) // 2
 
-        img         = Image.fromarray(frame_rgb).resize((nw, nh), Image.BILINEAR)
+        # Resize in cv2 (already a dependency, faster than PIL for ndarray input)
+        # then convert to PIL only for the small target-size frame.
+        try:
+            import cv2 as _cv2
+            frame_small = _cv2.resize(frame_rgb, (nw, nh), interpolation=_cv2.INTER_LINEAR)
+            img = Image.fromarray(frame_small)
+        except Exception:
+            img = Image.fromarray(frame_rgb).resize((nw, nh), Image.BILINEAR)
+
         photo       = ImageTk.PhotoImage(img)
         self._photo_image = photo    # hold reference
 
         c.delete("frame")
         c.create_image(ox, oy, anchor="nw", image=photo, tags="frame")
-
-        self._update_playhead(time_s)
+        # Playhead/transcript sync is handled by _on_time → _flush_time_update
+        # to avoid calling _update_playhead twice per frame.
 
     def _update_playhead(self, time_s: float) -> None:
         """Update transport time label and waveform playhead."""
@@ -1037,24 +1109,45 @@ class TextEditor(ctk.CTk):
         is_playing = self._player.is_playing if self._player else False
         self._play_btn.configure(text="⏸" if is_playing else "▶")
 
-        # Update waveform playhead
+        # Update waveform playhead — move_playhead() only repositions the
+        # playhead line; it does NOT redraw 6012 segment markers + waveform
+        # bars.  Full draw() is called only when segment state changes.
         if self._waveform_view:
-            self._waveform_view.set_playhead(time_s)
-            self._waveform_view.draw()
+            self._waveform_view.move_playhead(time_s)
 
         # Highlight the segment corresponding to current time
         self._highlight_current_seg(time_s)
 
     def _highlight_current_seg(self, time_s: float) -> None:
-        """Scroll transcript to show segment at *time_s* and faintly mark it."""
+        """Scroll transcript to show segment at *time_s*.
+
+        Uses a cached sorted-starts list + bisect for O(log N) lookup instead
+        of the original O(N) linear scan that blocked the UI at 6000+ segments.
+        Skips the expensive tag_ranges/see calls when the segment hasn't changed.
+        """
+        import bisect
         segs = self.project.segments
-        for i, seg in enumerate(segs):
-            if seg.start <= time_s <= seg.end:
-                tag = f"seg_{i}"
-                ranges = self._text.tag_ranges(tag)
-                if ranges:
-                    self._text.see(str(ranges[0]))
-                break
+        if not segs:
+            return
+
+        # Rebuild the sorted-starts cache whenever the segment list changes.
+        if getattr(self, "_seg_starts_cache", None) is None:
+            self._seg_starts_cache = [s.start for s in segs]
+
+        idx = bisect.bisect_right(self._seg_starts_cache, time_s) - 1
+        if idx < 0:
+            return
+        seg = segs[idx]
+        if time_s > seg.end:
+            return   # time is in a gap between segments — nothing to scroll to
+
+        if idx == getattr(self, "_last_highlight_seg", -1):
+            return   # already scrolled to this segment
+
+        self._last_highlight_seg = idx
+        ranges = self._text.tag_ranges(f"seg_{idx}")
+        if ranges:
+            self._text.see(str(ranges[0]))
 
     def _on_waveform_seek(self, time_s: float) -> None:
         """Called when user clicks on the waveform timeline."""
