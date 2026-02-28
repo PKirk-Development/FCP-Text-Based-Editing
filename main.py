@@ -224,11 +224,17 @@ def _process_fcpxml(
     click.echo(fcp.summary())
 
     if not fcp.video_path or not Path(fcp.video_path).exists():
-        raise click.ClickException(
-            f"Source video not found at '{fcp.video_path}'.\n"
-            "Make sure the FCPXML was exported from FCP on the same machine, "
-            "or that the media is accessible at the listed path."
+        _msg = (
+            f"Source video not found:\n{fcp.video_path}\n\n"
+            "Make sure the FCPXML was exported from FCP on the same machine "
+            "and that the original media file is still at that path."
         )
+        # In a frozen .app there is no terminal, so a ClickException would
+        # silently exit.  Raise a plain RuntimeError so the crash handler
+        # catches it and shows the GUI error dialog.
+        if getattr(sys, "frozen", False):
+            raise RuntimeError(_msg)
+        raise click.ClickException(_msg)
 
     if not fcp.has_captions():
         click.echo("  ⚠  No captions found in FCPXML. "
@@ -509,6 +515,15 @@ if __name__ == "__main__":
                 _path = _picker_result.stdout.strip()
                 if not _path or not Path(_path).exists():
                     sys.exit(0)   # user cancelled or path invalid — quit cleanly
+
+                # AppleScript's `choose file` navigates INTO .fcpxmld packages
+                # (they are directories, so the picker opens them).  The user
+                # ends up selecting Info.fcpxml inside the bundle.  Detect that
+                # and remap so the rest of the code sees the package path.
+                _pp = Path(_path)
+                if (_pp.name == "Info.fcpxml"
+                        and _pp.parent.suffix.lower() == ".fcpxmld"):
+                    _path = str(_pp.parent)
 
                 sys.argv = [sys.argv[0], "edit", _path]
 

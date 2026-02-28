@@ -119,6 +119,7 @@ class FCPXMLProject:
         self.format_id      = "r1"
         self.fcpxml_version = "1.11"
         self.raw_tree: Optional[ET.ElementTree] = None
+        self._xml_dir       = str(Path(fcpxml_path).resolve().parent)
 
         self._parse(fcpxml_path)
 
@@ -138,6 +139,7 @@ class FCPXMLProject:
                 )
             path = str(inner)
 
+        self._xml_dir = str(_Path(path).resolve().parent)
         tree = ET.parse(path)
         self.raw_tree = tree
         root = tree.getroot()
@@ -192,7 +194,14 @@ class FCPXMLProject:
             src = asset.get("src", "")
 
         if src:
-            self.video_path = _asset_path_from_url(src)
+            raw = _asset_path_from_url(src)
+            # If the path is relative, resolve it relative to the XML file's
+            # directory.  This handles .fcpxmld packages where FCP stores media
+            # inside the bundle (e.g. "Media/MyVideo.mov" relative to Info.fcpxml).
+            p = Path(raw)
+            if not p.is_absolute():
+                p = (Path(self._xml_dir) / p).resolve()
+            self.video_path = str(p)
 
     def _parse_format(self, fmt: ET.Element) -> None:
         """Extract fps / width / height from a <format> element."""
