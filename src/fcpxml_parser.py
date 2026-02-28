@@ -1,13 +1,13 @@
 """
 FCPXML parser for FCP 11's "Transcribe to Captions" workflow.
 
-Supports FCPXML versions 1.8 – 1.11.
+Supports FCPXML versions 1.8 – 1.14 (all versions exported by FCP 10.6–10.8+).
 
 Workflow
 --------
-1. In FCP 11: Clip → Transcribe to Captions  (requires Apple Silicon + Sequoia)
-2. File → Export XML…  (choose FCPXML)
-3. Run: python main.py edit project.fcpxml
+1. In FCP 11: Clip → Transcribe to Captions  (requires Apple Silicon + macOS Sequoia)
+2. File → Export XML…  (choose FCPXML 1.11, 1.12, 1.13, or 1.14 — all work)
+3. Open the .fcpxml file in FCP Text Editor
 
 The parser extracts:
   • The source video asset path
@@ -211,14 +211,17 @@ class FCPXMLProject:
             if duration_s <= 0:
                 continue
 
-            # Text comes from child <text> element(s)
+            # Text comes from child <text> element(s).
+            # In FCPXML 1.12+ FCP wraps the actual string in <text-style>
+            # children, so text_el.text is None.  itertext() collects all
+            # text nodes at any depth, handling both old and new layouts.
             texts = []
             for text_el in _find_all(cap, "text"):
-                t = (text_el.text or "").strip()
+                t = "".join(text_el.itertext()).strip()
                 if t:
                     texts.append(t)
             if not texts:
-                # Fall back to the name attribute
+                # Fall back to the name attribute (always populated by FCP)
                 name = cap.get("name", "").strip()
                 if name:
                     texts = [name]
