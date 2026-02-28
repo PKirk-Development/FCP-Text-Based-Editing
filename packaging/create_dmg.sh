@@ -60,21 +60,18 @@ else
     cp -R "$APP_PATH" "$STAGE_DIR/"
     ln -sf /Applications "$STAGE_DIR/Applications"
 
-    APP_SIZE_KB=$(du -sk "$APP_PATH" | awk '{print $1}')
-    # Add 25% overhead for HFS+ metadata + a 50 MB minimum buffer.
-    # A flat 10 MB is far too small for large bundles (e.g. PyTorch/Whisper
-    # ~600 MB with thousands of files whose catalog entries alone exceed 10 MB).
-    DMG_SIZE_KB=$(( APP_SIZE_KB + APP_SIZE_KB / 4 + 51200 ))
+    info "Creating DMG image (auto-sized from source)…"
 
-    info "Creating ${DMG_SIZE_KB} KB DMG image…"
-
+    # Do NOT pass -size: when -srcfolder is used hdiutil calculates the required
+    # space automatically.  A hard-coded size underestimates bundles that contain
+    # symlinks (e.g. torchaudio/lib/libtorchaudio.so) because du -sk does not
+    # follow symlinks, but hdiutil resolves them on copy → "No space left on device".
     hdiutil create \
         -srcfolder "$STAGE_DIR" \
         -volname "$APP_NAME" \
         -fs HFS+ \
         -fsargs "-c c=8,a=8,b=8" \
         -format UDBZ \
-        -size "${DMG_SIZE_KB}k" \
         "$DMG_PATH"
 
     ok "DMG created: $DMG_PATH"

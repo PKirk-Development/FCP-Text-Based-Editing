@@ -10,9 +10,34 @@ Each word in the result carries a precise start/end in seconds.
 
 from __future__ import annotations
 
+import ssl
+import urllib.request
+import warnings
 from typing import Callable, Optional
 
 from .models import TextSegment
+
+
+def _install_ssl_context() -> None:
+    """
+    Patch urllib's default HTTPS handler to use certifi's CA bundle.
+
+    On macOS, Python installed from python.org ships without the system
+    keychain CAs, so Whisper's model download fails with
+    CERTIFICATE_VERIFY_FAILED.  On corporate networks an MITM proxy may
+    present a self-signed chain; in that case we fall back to unverified
+    HTTPS and emit a warning.
+    """
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = ssl.create_default_context()
+
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx)
+    )
+    urllib.request.install_opener(opener)
 
 
 # Available model sizes (smallest → fastest, largest → most accurate)
@@ -57,7 +82,27 @@ def transcribe(
     if progress_cb:
         progress_cb(f"Loading Whisper model '{model_size}'…", 5)
 
-    model = whisper.load_model(model_size)
+    _install_ssl_context()
+    try:
+        model = whisper.load_model(model_size)
+    except Exception as exc:
+        # If the download failed due to SSL (e.g. corporate MITM proxy with a
+        # self-signed certificate), retry without certificate verification.
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "SSL" in str(exc):
+            warnings.warn(
+                "Whisper model download failed SSL verification "
+                "(self-signed certificate in chain?). "
+                "Retrying without certificate verification.",
+                stacklevel=2,
+            )
+            ctx = ssl._create_unverified_context()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ctx)
+            )
+            urllib.request.install_opener(opener)
+            model = whisper.load_model(model_size)
+        else:
+            raise
 
     if progress_cb:
         progress_cb("Transcribing audio…", 15)
