@@ -10,9 +10,10 @@ opencv-python>=4.8.0       # OpenCV — frame-by-frame video decoding
 click>=8.1.0
 rich>=13.7.0               # coloured terminal output during processing
 
-# ── Audio analysis ────────────────────────────────────────────────────────────
+# ── Audio analysis + playback ─────────────────────────────────────────────────
 pydub>=0.25.1              # 1 ms-precision silence detection (seek_step=1)
 numpy>=1.24.0              # waveform peak/RMS computation
+pygame>=2.5.0              # audio playback (mirrors pre-extracted WAV with video)
 
 # ── Transcription (required for .mp4 workflow) ────────────────────────────────
 # openai-whisper requires PyTorch.

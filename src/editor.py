@@ -464,31 +464,53 @@ class TextEditor(ctk.CTk):
     # ── Transcript population ─────────────────────────────────────────────────
 
     def _populate_transcript(self) -> None:
-        """Insert all segments into the Text widget and apply initial styling."""
+        """Insert all segments into the Text widget and apply initial styling.
+
+        Character-offset strategy (no per-segment positional tags)
+        ───────────────────────────────────────────────────────────
+        Previously each segment i received a named tag "seg_i" so that
+        _refresh_seg / _highlight_current_seg could call tag_ranges("seg_i")
+        to recover its text bounds.  With thousands of segments that creates
+        tens of thousands of tag-range entries in Tk's internal B-tree, which
+        causes extremely slow repaints and a hard crash when the user scrolls.
+
+        Instead we record the character-offset boundaries of every segment in
+        two plain Python lists (_seg_char_starts / _seg_char_ends).  Because
+        segment text never contains newlines, len(content) == Tk's character
+        count for that insertion, so the lists stay in sync with the widget.
+        We can then:
+          • refresh a segment with  "1.0 + N chars" index expressions (O(1))
+          • find a segment from a click with bisect (O(log N))
+        Only the fixed set of style tags (~14 entries) are ever added to the
+        widget — one per segment, but reused across all segments of the same
+        type/state.
+        """
+        import bisect as _bisect  # noqa: F401 – used by _tk_idx_to_seg later
         t = self._text
         t.delete("1.0", "end")
 
         settings = self.project.silence_settings
 
-        # _seg_style tracks the currently-applied style tag for each segment so
-        # _refresh_seg can remove only that one tag instead of all 14 style tags.
-        self._seg_style: list[str] = []
+        self._seg_style:       list[str] = []
+        self._seg_char_starts: list[int] = []
+        self._seg_char_ends:   list[int] = []
 
-        # Invalidate binary-search caches used by _highlight_current_seg.
-        self._seg_starts_cache = None
+        # Invalidate time-based caches used by _highlight_current_seg.
+        self._seg_starts_cache  = None
         self._last_highlight_seg = -1
 
+        char_offset = 0
         for i, seg in enumerate(self.project.segments):
-            seg_tag   = f"seg_{i}"
             style_tag = self._style_tag(seg, i, settings)
             self._seg_style.append(style_tag)
+            self._seg_char_starts.append(char_offset)
 
-            if isinstance(seg, TextSegment):
-                content = seg.text + " "
-            else:
-                content = f"[■ {seg.duration:.2f}s] "
+            content = (seg.text + " ") if isinstance(seg, TextSegment) \
+                      else f"[■ {seg.duration:.2f}s] "
 
-            t.insert("end", content, (seg_tag, style_tag))
+            t.insert("end", content, style_tag)   # ← only one tag; no seg_i
+            char_offset += len(content)
+            self._seg_char_ends.append(char_offset)
 
         # Prevent accidental text insertion; cursor still works
         t.mark_set("insert", "1.0")
@@ -496,31 +518,27 @@ class TextEditor(ctk.CTk):
     def _refresh_seg(self, idx: int) -> None:
         """Reapply the correct style tag to one segment (after state change).
 
-        Uses _seg_style to remove only the one currently-applied style tag
-        instead of issuing 14 tag_remove calls.  That reduces the per-segment
-        cost from 15 tkinter operations down to 2.
+        Uses _seg_char_starts / _seg_char_ends for O(1) range lookup instead
+        of the old tag_ranges("seg_i") which was O(total-tags) per call.
         """
-        t       = self._text
-        seg_tag = f"seg_{idx}"
-        ranges  = t.tag_ranges(seg_tag)
-        if len(ranges) < 2:
+        t = self._text
+        starts = getattr(self, "_seg_char_starts", None)
+        ends   = getattr(self, "_seg_char_ends",   None)
+        if not starts or idx >= len(starts):
             return
-        start, end = str(ranges[0]), str(ranges[1])
+        start_tk = f"1.0 + {starts[idx]} chars"
+        end_tk   = f"1.0 + {ends[idx]} chars"
 
-        seg       = self.project.segments[idx]
-        new_tag   = self._style_tag(seg, idx, self.project.silence_settings)
+        seg     = self.project.segments[idx]
+        new_tag = self._style_tag(seg, idx, self.project.silence_settings)
+        old_tag = self._seg_style[idx] if idx < len(self._seg_style) else None
 
-        seg_style = getattr(self, "_seg_style", None)
-        if seg_style is not None and idx < len(seg_style):
-            old_tag = seg_style[idx]
-            if old_tag != new_tag:
-                t.tag_remove(old_tag, start, end)
-                t.tag_add(new_tag, start, end)
-                seg_style[idx] = new_tag
-        else:
-            # Fallback: _seg_style not populated yet (shouldn't normally happen)
-            for tag in _STYLE_TAGS:
-                t.tag_remove(tag, start, end)
+        if old_tag and old_tag != new_tag:
+            t.tag_remove(old_tag, start_tk, end_tk)
+        t.tag_add(new_tag, start_tk, end_tk)
+        if idx < len(self._seg_style):
+            self._seg_style[idx] = new_tag
+
             t.tag_add(new_tag, start, end)
 
     def _style_tag(self, seg: Segment, idx: int, settings: SilenceSettings) -> str:
@@ -544,13 +562,22 @@ class TextEditor(ctk.CTk):
     # ── Segment lookup helper ─────────────────────────────────────────────────
 
     def _tk_idx_to_seg(self, tk_idx: str) -> Optional[int]:
-        """Return the segment index whose positional tag covers *tk_idx*."""
-        for tag in self._text.tag_names(tk_idx):
-            if tag.startswith("seg_"):
-                try:
-                    return int(tag[4:])
-                except ValueError:
-                    pass
+        """Return the segment index that covers *tk_idx* using char offsets."""
+        import bisect
+        starts = getattr(self, "_seg_char_starts", None)
+        ends   = getattr(self, "_seg_char_ends",   None)
+        if not starts:
+            return None
+        try:
+            result = self._text.count("1.0", tk_idx, "chars")
+            if not result:
+                return None
+            char_offset = int(result[0])
+        except Exception:
+            return None
+        idx = bisect.bisect_right(starts, char_offset) - 1
+        if 0 <= idx < len(ends) and char_offset < ends[idx]:
+            return idx
         return None
 
     # ── Mouse event handlers ──────────────────────────────────────────────────
@@ -935,14 +962,19 @@ class TextEditor(ctk.CTk):
             return
 
         # Apply orange highlights to found fillers
-        for i in hard_idxs:
-            ranges = self._text.tag_ranges(f"seg_{i}")
-            if len(ranges) >= 2:
-                self._text.tag_add("um_hl", str(ranges[0]), str(ranges[1]))
-        for i in soft_idxs:
-            ranges = self._text.tag_ranges(f"seg_{i}")
-            if len(ranges) >= 2:
-                self._text.tag_add("um_soft_hl", str(ranges[0]), str(ranges[1]))
+        starts = getattr(self, "_seg_char_starts", None)
+        ends   = getattr(self, "_seg_char_ends",   None)
+        if starts and ends:
+            for i in hard_idxs:
+                if i < len(starts):
+                    self._text.tag_add("um_hl",
+                                       f"1.0 + {starts[i]} chars",
+                                       f"1.0 + {ends[i]} chars")
+            for i in soft_idxs:
+                if i < len(starts):
+                    self._text.tag_add("um_soft_hl",
+                                       f"1.0 + {starts[i]} chars",
+                                       f"1.0 + {ends[i]} chars")
 
         self._um_hard_indices = hard_idxs
         self._um_soft_indices = soft_idxs
@@ -1145,9 +1177,9 @@ class TextEditor(ctk.CTk):
             return   # already scrolled to this segment
 
         self._last_highlight_seg = idx
-        ranges = self._text.tag_ranges(f"seg_{idx}")
-        if ranges:
-            self._text.see(str(ranges[0]))
+        starts = getattr(self, "_seg_char_starts", None)
+        if starts and idx < len(starts):
+            self._text.see(f"1.0 + {starts[idx]} chars")
 
     def _on_waveform_seek(self, time_s: float) -> None:
         """Called when user clicks on the waveform timeline."""

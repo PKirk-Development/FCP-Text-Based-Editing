@@ -50,8 +50,9 @@ hiddenimports = [
     "_tkinter",
     # Video decoding
     "cv2",
-    # Audio
+    # Audio (analysis + playback)
     "pydub", "pydub.audio_segment", "pydub.effects", "pydub.generators",
+    "pygame", "pygame.mixer", "pygame.mixer_music",
     "numpy", "numpy.core._multiarray_umath",
     # CLI
     "click", "click.core", "click.decorators", "click.utils",

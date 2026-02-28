@@ -106,7 +106,7 @@ class AbstractVideoPlayer(ABC):
 
 class OpenCVPlayer(AbstractVideoPlayer):
     """
-    OpenCV-based video player.
+    OpenCV-based video player with pygame audio.
 
     Edit-aware playback
     ───────────────────
@@ -114,7 +114,24 @@ class OpenCVPlayer(AbstractVideoPlayer):
     the current frame falls inside a deleted region and, if so, seeks to the
     start of the next keep range — giving the user a live preview of the edited
     result.
+
+    Audio
+    ─────
+    OpenCV's Python bindings carry no audio.  We drive audio separately via
+    pygame.mixer, playing the pre-extracted WAV (project.audio_path) that was
+    already written during transcription.  Seek, pause, and stop are mirrored
+    to the mixer so playback stays in sync.
+
+    Video performance
+    ─────────────────
+    For preview purposes the play loop caps output at MAX_PREVIEW_FPS (24 fps)
+    and never tries to decode faster than that, regardless of source frame rate.
+    This keeps the main thread / Tk paint loop from being overwhelmed by fast
+    (e.g. 60 fps) sources.  Frames are also decoded at full resolution — the
+    resize-to-canvas step is done in the editor's _display_frame, not here.
     """
+
+    MAX_PREVIEW_FPS = 24  # cap preview rate for Tk canvas performance
 
     def __init__(self) -> None:
         try:
@@ -138,8 +155,13 @@ class OpenCVPlayer(AbstractVideoPlayer):
         self._frame_cb: Optional[Callable] = None
         self._time_cb:  Optional[Callable] = None
 
-        self._project:    Optional[Project] = None
+        self._project:     Optional[Project] = None
         self._keep_ranges: list[tuple[float, float]] = []
+
+        # pygame audio state
+        self._audio_path:    str  = ""
+        self._pygame_ready:  bool = False   # True after mixer.init() succeeded
+        self._audio_playing: bool = False
 
     # ── AbstractVideoPlayer ───────────────────────────────────────────────────
 
@@ -165,15 +187,23 @@ class OpenCVPlayer(AbstractVideoPlayer):
     def seek(self, time_s: float) -> None:
         if self._cap is None:
             return
+        was_playing = self._playing
+        # Stop audio before seeking so it doesn't play at the old position
+        if was_playing:
+            self._audio_stop()
         time_s = max(0.0, min(time_s, self._duration))
         self._cap.set(self._cv2.CAP_PROP_POS_MSEC, time_s * 1000.0)
         self._current_time = time_s
         self._display_frame_at(time_s, read_next=True)
+        # Resume audio at the new position if we were playing
+        if was_playing:
+            self._audio_play(time_s)
 
     def play(self) -> None:
         if self._playing or self._cap is None:
             return
         self._playing     = True
+        self._audio_play(self._current_time)
         self._play_thread = threading.Thread(
             target=self._play_loop, daemon=True, name="VideoPlayThread"
         )
@@ -181,6 +211,7 @@ class OpenCVPlayer(AbstractVideoPlayer):
 
     def pause(self) -> None:
         self._playing = False
+        self._audio_stop()
 
     def toggle(self) -> None:
         if self._playing:
@@ -203,9 +234,15 @@ class OpenCVPlayer(AbstractVideoPlayer):
     def set_project(self, project: Project) -> None:
         self._project = project
         self._rebuild_keep_ranges()
+        # Pick up audio path from project (extracted during transcription)
+        ap = getattr(project, "audio_path", "")
+        if ap and ap != self._audio_path:
+            self._audio_path = ap
+            self._pygame_init()
 
     def close(self) -> None:
         self._playing = False
+        self._audio_stop()
         if self._play_thread and self._play_thread.is_alive():
             self._play_thread.join(timeout=1.0)
         if self._cap:
@@ -239,8 +276,19 @@ class OpenCVPlayer(AbstractVideoPlayer):
         return None
 
     def _play_loop(self) -> None:
+        """Decode and deliver frames, capped at MAX_PREVIEW_FPS.
+
+        The cap keeps the Tk canvas paint loop from being overwhelmed by
+        high-frame-rate sources (60 fps ProRes, etc.).  When the source
+        fps exceeds the cap we skip source frames by seeking forward to
+        stay on-time rather than letting the player fall behind.
+        """
         cv2 = self._cv2
-        frame_dur = 1.0 / self._fps
+        # Use source fps for audio/seek math, cap delivery for Tk performance
+        preview_fps  = min(self._fps, self.MAX_PREVIEW_FPS)
+        preview_dur  = 1.0 / preview_fps
+        # How many source frames correspond to one preview frame
+        src_stride   = max(1, round(self._fps / preview_fps))
 
         while self._playing and self._cap is not None:
             loop_start = time.perf_counter()
@@ -263,6 +311,9 @@ class OpenCVPlayer(AbstractVideoPlayer):
                     break
                 with self._lock:
                     self._cap.set(cv2.CAP_PROP_POS_MSEC, nxt * 1000.0)
+                # Seek audio forward too so it doesn't play over the gap
+                if self._audio_playing and self._pygame_ready:
+                    self._audio_play(nxt)
                 continue
 
             # Deliver frame to UI
@@ -272,13 +323,20 @@ class OpenCVPlayer(AbstractVideoPlayer):
             if self._time_cb:
                 self._time_cb(t)
 
-            # Pace to target frame rate
+            # Skip source frames to match preview rate
+            if src_stride > 1:
+                with self._lock:
+                    target_ms = (t + (src_stride - 1) / self._fps) * 1000.0
+                    self._cap.set(cv2.CAP_PROP_POS_MSEC, target_ms)
+
+            # Pace to preview frame rate, dropping sleep if decode was slow
             elapsed = time.perf_counter() - loop_start
-            wait    = frame_dur - elapsed
-            if wait > 0:
+            wait    = preview_dur - elapsed
+            if wait > 0.002:          # don't bother sleeping less than 2 ms
                 time.sleep(wait)
 
         self._playing = False
+        self._audio_playing = False
 
     def _display_frame_at(self, time_s: float, read_next: bool = False) -> None:
         """Display the frame at *time_s* immediately (seek-preview)."""
@@ -296,3 +354,41 @@ class OpenCVPlayer(AbstractVideoPlayer):
             self._frame_cb(frame_rgb, time_s)
         if self._time_cb:
             self._time_cb(time_s)
+
+    # ── pygame audio helpers ──────────────────────────────────────────────────
+
+    def _pygame_init(self) -> None:
+        """Initialise pygame.mixer once; silently skip if pygame isn't installed."""
+        try:
+            import pygame
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+            self._pygame_ready = True
+        except Exception:
+            self._pygame_ready = False
+
+    def _audio_play(self, start_s: float) -> None:
+        """Start audio playback from *start_s* seconds."""
+        if not self._pygame_ready or not self._audio_path:
+            return
+        try:
+            from pathlib import Path as _Path
+            if not _Path(self._audio_path).exists():
+                return
+            import pygame
+            pygame.mixer.music.load(self._audio_path)
+            pygame.mixer.music.play(start=start_s)
+            self._audio_playing = True
+        except Exception:
+            self._audio_playing = False
+
+    def _audio_stop(self) -> None:
+        """Stop audio playback."""
+        if not self._pygame_ready:
+            return
+        try:
+            import pygame
+            pygame.mixer.music.stop()
+        except Exception:
+            pass
+        self._audio_playing = False
