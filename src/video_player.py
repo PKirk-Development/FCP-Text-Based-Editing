@@ -19,10 +19,13 @@ OpenCVPlayer limitations on macOS (known)
 
 Audio playback
 ──────────────
-OpenCVPlayer uses pygame.mixer for audio when pygame is installed.
-On load(), ffmpeg extracts the audio track to a temporary WAV file which
-pygame.mixer.music streams.  play() / pause() / seek() keep audio and video
-in step.  If pygame is absent the player works silently (video only).
+OpenCVPlayer drives audio via macOS's built-in `afplay` utility
+(subprocess).  afplay decodes the source video's audio track through
+Core Audio — no extraction step, no SDL2, no extra dependencies.
+Seeking is handled via afplay's -s flag; the process is killed and
+restarted whenever play/pause/seek changes position.
+
+On non-macOS platforms (Linux dev) the player runs silently (video only).
 
 Future: replace with AVFoundation via subprocess call to a minimal Swift helper,
 or via PyObjC bindings.  See docs/MACOS_ROADMAP.md (to be added).
@@ -30,10 +33,8 @@ or via PyObjC bindings.  See docs/MACOS_ROADMAP.md (to be added).
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
-import tempfile
 import time
 import threading
 from abc import ABC, abstractmethod
@@ -117,20 +118,22 @@ class AbstractVideoPlayer(ABC):
 
 class OpenCVPlayer(AbstractVideoPlayer):
     """
-    OpenCV-based video player with optional pygame.mixer audio.
+    OpenCV-based video player with afplay audio (macOS).
 
     Edit-aware playback
     ───────────────────
     When a Project is attached (via set_project), the play loop checks whether
     the current frame falls inside a deleted region and, if so, seeks to the
     start of the next keep range — giving the user a live preview of the edited
-    result.  Audio is re-cued to match whenever the video skips.
+    result.  The afplay process is killed and restarted to match whenever the
+    video skips.
 
     Audio
     ─────
-    On load(), ffmpeg extracts the audio track to a temp WAV file.
-    pygame.mixer.music streams that file during play().  If pygame is not
-    installed the player degrades silently to video-only.
+    afplay is a macOS CLI tool that plays audio/video files through Core Audio.
+    We run it as a subprocess with -s <startTime> so it begins at the right
+    offset.  Pause = kill the process; resume = restart from _current_time.
+    On non-macOS the player degrades to video-only with no error.
     """
 
     def __init__(self) -> None:
@@ -158,10 +161,8 @@ class OpenCVPlayer(AbstractVideoPlayer):
         self._project:    Optional[Project] = None
         self._keep_ranges: list[tuple[float, float]] = []
 
-        # Audio state
-        self._mixer     = None          # pygame.mixer module, or None
-        self._audio_tmp: Optional[str] = None   # temp WAV path
-        self._init_pygame_mixer()
+        # Audio: afplay subprocess or None
+        self._audio_proc: Optional[subprocess.Popen] = None
 
     # ── AbstractVideoPlayer ───────────────────────────────────────────────────
 
@@ -182,7 +183,6 @@ class OpenCVPlayer(AbstractVideoPlayer):
         total_frames       = self._cap.get(cv2.CAP_PROP_FRAME_COUNT)
         self._duration     = total_frames / self._fps if self._fps > 0 else 0.0
         self._current_time = 0.0
-        self._extract_audio(video_path)
         self._display_frame_at(0.0)
 
     def seek(self, time_s: float) -> None:
@@ -193,23 +193,15 @@ class OpenCVPlayer(AbstractVideoPlayer):
         self._cap.set(self._cv2.CAP_PROP_POS_MSEC, time_s * 1000.0)
         self._current_time = time_s
         self._display_frame_at(time_s, read_next=True)
-        # Re-cue audio only if already playing; if paused, play() will read
-        # _current_time and start from there when resumed.
-        if was_playing and self._mixer and self._audio_tmp:
-            try:
-                self._mixer.music.play(start=time_s)
-            except Exception as e:
-                print(f"[audio] seek failed: {e}", file=sys.stderr)
+        if was_playing:
+            # Restart audio from the new position
+            self._start_audio(time_s)
 
     def play(self) -> None:
         if self._playing or self._cap is None:
             return
         self._playing = True
-        if self._mixer and self._audio_tmp:
-            try:
-                self._mixer.music.play(start=self._current_time)
-            except Exception as e:
-                print(f"[audio] play failed: {e}", file=sys.stderr)
+        self._start_audio(self._current_time)
         self._play_thread = threading.Thread(
             target=self._play_loop, daemon=True, name="VideoPlayThread"
         )
@@ -217,11 +209,7 @@ class OpenCVPlayer(AbstractVideoPlayer):
 
     def pause(self) -> None:
         self._playing = False
-        if self._mixer:
-            try:
-                self._mixer.music.pause()
-            except Exception:
-                pass
+        self._stop_audio()
 
     def toggle(self) -> None:
         if self._playing:
@@ -247,84 +235,42 @@ class OpenCVPlayer(AbstractVideoPlayer):
 
     def close(self) -> None:
         self._playing = False
-        if self._mixer:
-            try:
-                self._mixer.music.stop()
-            except Exception:
-                pass
+        self._stop_audio()
         if self._play_thread and self._play_thread.is_alive():
             self._play_thread.join(timeout=1.0)
         if self._cap:
             self._cap.release()
             self._cap = None
-        self._delete_audio_tmp()
+
+    # ── Audio ─────────────────────────────────────────────────────────────────
+
+    def _start_audio(self, start_s: float) -> None:
+        """Kill any running afplay and start a new one from *start_s* seconds."""
+        self._stop_audio()
+        if not self._video_path:
+            return
+        try:
+            self._audio_proc = subprocess.Popen(
+                ["afplay", "-s", f"{start_s:.3f}", self._video_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass  # afplay not available (non-macOS); video-only fallback
+        except Exception as e:
+            print(f"[audio] afplay error: {e}", file=sys.stderr)
+
+    def _stop_audio(self) -> None:
+        """Terminate the afplay subprocess if it is running."""
+        if self._audio_proc is not None:
+            try:
+                self._audio_proc.terminate()
+                self._audio_proc.wait(timeout=0.5)
+            except Exception:
+                pass
+            self._audio_proc = None
 
     # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _init_pygame_mixer(self) -> None:
-        """Initialise pygame.mixer; skip if pygame is not installed."""
-        try:
-            import pygame.mixer as mixer
-            mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
-            self._mixer = mixer
-            print("[audio] pygame.mixer ready", file=sys.stderr)
-        except Exception as e:
-            print(f"[audio] pygame.mixer init failed: {e}", file=sys.stderr)
-            self._mixer = None
-
-    def _extract_audio(self, video_path: str) -> None:
-        """
-        Extract audio track from *video_path* into a temporary OGG file and
-        load it into pygame.mixer.music.
-
-        OGG is used because pygame.mixer.music.play(start=seconds) only
-        supports time-based seeking for OGG and MP3; WAV raises
-        NotImplementedError for any non-zero start position.
-        """
-        if self._mixer is None:
-            return
-
-        self._delete_audio_tmp()
-
-        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
-        tmp.close()
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y",
-                    "-i", video_path,
-                    "-vn",                    # strip video
-                    "-acodec", "libvorbis",   # OGG Vorbis — supports seek
-                    "-ar", "44100",
-                    "-ac", "2",               # stereo
-                    "-q:a", "4",              # quality level (0–10, 4 ≈ 128 kbps)
-                    tmp.name,
-                ],
-                capture_output=True,
-                timeout=60,
-            )
-            if result.returncode == 0:
-                self._mixer.music.load(tmp.name)
-                self._audio_tmp = tmp.name
-                print(f"[audio] extracted → {tmp.name}", file=sys.stderr)
-            else:
-                err = result.stderr.decode(errors="replace").strip().splitlines()
-                print(f"[audio] ffmpeg failed (no audio stream?): {err[-1] if err else 'unknown'}", file=sys.stderr)
-                os.unlink(tmp.name)
-        except Exception as e:
-            print(f"[audio] extraction error: {e}", file=sys.stderr)
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-
-    def _delete_audio_tmp(self) -> None:
-        if self._audio_tmp:
-            try:
-                os.unlink(self._audio_tmp)
-            except OSError:
-                pass
-            self._audio_tmp = None
 
     def _rebuild_keep_ranges(self) -> None:
         if self._project is None:
@@ -375,12 +321,7 @@ class OpenCVPlayer(AbstractVideoPlayer):
                     break
                 with self._lock:
                     self._cap.set(cv2.CAP_PROP_POS_MSEC, nxt * 1000.0)
-                # Re-cue audio to match the video skip
-                if self._mixer and self._audio_tmp:
-                    try:
-                        self._mixer.music.play(start=nxt)
-                    except Exception:
-                        pass
+                self._start_audio(nxt)
                 continue
 
             # Deliver frame to UI
@@ -396,12 +337,7 @@ class OpenCVPlayer(AbstractVideoPlayer):
             if wait > 0:
                 time.sleep(wait)
 
-        # Stop audio when the play loop exits naturally (end of clip)
-        if self._mixer:
-            try:
-                self._mixer.music.stop()
-            except Exception:
-                pass
+        self._stop_audio()
         self._playing = False
 
     def _display_frame_at(self, time_s: float, read_next: bool = False) -> None:
@@ -411,7 +347,6 @@ class OpenCVPlayer(AbstractVideoPlayer):
         cv2 = self._cv2
 
         if not read_next:
-            # Peek at the most-recently-seeked frame without advancing
             self._cap.set(cv2.CAP_PROP_POS_MSEC, time_s * 1000.0)
 
         ret, frame = self._cap.read()
