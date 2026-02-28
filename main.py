@@ -507,7 +507,11 @@ if __name__ == "__main__":
                     capture_output=True, text=True,
                 )
                 _path = _picker_result.stdout.strip()
-                if not _path or not Path(_path).is_file():
+                _pp = Path(_path)
+                if not _path or not (
+                    _pp.is_file()
+                    or (_pp.suffix.lower() == ".fcpxmld" and _pp.is_dir())
+                ):
                     sys.exit(0)   # user cancelled or path invalid — quit cleanly
 
                 sys.argv = [sys.argv[0], "edit", _path]
