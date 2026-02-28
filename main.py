@@ -507,7 +507,7 @@ if __name__ == "__main__":
                     capture_output=True, text=True,
                 )
                 _path = _picker_result.stdout.strip()
-                if not _path or not Path(_path).is_file():
+                if not _path or not Path(_path).exists():
                     sys.exit(0)   # user cancelled or path invalid — quit cleanly
 
                 sys.argv = [sys.argv[0], "edit", _path]
