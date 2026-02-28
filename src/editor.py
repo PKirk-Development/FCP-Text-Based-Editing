@@ -174,6 +174,10 @@ class TextEditor(ctk.CTk):
         # Video player (OpenCVPlayer, loaded async)
         self._player                 = None
         self._photo_image            = None   # hold PIL reference to prevent GC
+        # Frame-drop flags: prevent after(0,...) backlog when main thread is slow
+        self._frame_pending          = False  # True = a frame render is queued
+        self._time_pending           = False  # True = a playhead update is queued
+        self._pending_time           = 0.0    # latest time from player thread
 
         # Waveform
         self._waveform_data          = None
@@ -1024,15 +1028,37 @@ class TextEditor(ctk.CTk):
         self._waveform_view.draw(project=self.project, playhead_s=0.0)
 
     def _on_frame(self, frame_rgb, time_s: float) -> None:
-        """Called from OpenCVPlayer's play thread — schedule display on main thread."""
+        """Called from player thread — drop frame if main thread hasn't rendered the last one.
+
+        Without this guard, after(0,...) creates an unbounded backlog when the
+        main thread is slower than the video frame rate.  The queue fills up
+        with dozens of pending PIL-resize + PhotoImage operations, making the
+        UI completely unresponsive until it drains.
+        """
+        if self._frame_pending:
+            return   # drop — main thread is still processing the previous frame
+        self._frame_pending = True
         self.after(0, lambda: self._display_frame(frame_rgb, time_s))
 
     def _on_time(self, time_s: float) -> None:
-        """Called from OpenCVPlayer's play thread — schedule playhead update."""
-        self.after(0, lambda: self._update_playhead(time_s))
+        """Called from player thread — coalesce rapid updates into one main-thread call.
+
+        Store the latest timestamp and schedule a single flush; any intermediate
+        values received before the flush are discarded so the queue never backs up.
+        """
+        self._pending_time = time_s
+        if not self._time_pending:
+            self._time_pending = True
+            self.after(0, self._flush_time_update)
+
+    def _flush_time_update(self) -> None:
+        self._time_pending = False
+        self._update_playhead(self._pending_time)
 
     def _display_frame(self, frame_rgb, time_s: float) -> None:
         """Render a numpy RGB frame into the video canvas (aspect-ratio preserving)."""
+        self._frame_pending = False   # allow _on_frame to queue the next frame
+
         try:
             from PIL import Image, ImageTk
         except ImportError:
@@ -1051,14 +1077,22 @@ class TextEditor(ctk.CTk):
         nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
         ox, oy = (cw - nw) // 2, (ch - nh) // 2
 
-        img         = Image.fromarray(frame_rgb).resize((nw, nh), Image.BILINEAR)
+        # Resize in cv2 (already a dependency, faster than PIL for ndarray input)
+        # then convert to PIL only for the small target-size frame.
+        try:
+            import cv2 as _cv2
+            frame_small = _cv2.resize(frame_rgb, (nw, nh), interpolation=_cv2.INTER_LINEAR)
+            img = Image.fromarray(frame_small)
+        except Exception:
+            img = Image.fromarray(frame_rgb).resize((nw, nh), Image.BILINEAR)
+
         photo       = ImageTk.PhotoImage(img)
         self._photo_image = photo    # hold reference
 
         c.delete("frame")
         c.create_image(ox, oy, anchor="nw", image=photo, tags="frame")
-
-        self._update_playhead(time_s)
+        # Playhead/transcript sync is handled by _on_time → _flush_time_update
+        # to avoid calling _update_playhead twice per frame.
 
     def _update_playhead(self, time_s: float) -> None:
         """Update transport time label and waveform playhead."""
